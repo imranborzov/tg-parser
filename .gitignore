@@ -1,0 +1,22 @@
+# Environment & secrets
+.env
+
+# Telegram session file (contains auth tokens — never commit)
+src/database/*.session
+src/database/*.session-journal
+
+# Database (runtime state, not source)
+src/database/*.sqlite
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/

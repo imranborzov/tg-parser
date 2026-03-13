@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TG Parser</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        dark: {
+                            bg:     '#0d1117',
+                            card:   '#161b22',
+                            border: '#21262d'
+                        },
+                        primary:      '#3B82F6',
+                        primaryHover: '#2563EB'
+                    }
+                }
+            }
+        }
+    </script>
+    <style type="text/tailwindcss">
+        @layer components {
+            .input-field {
+                @apply w-full bg-dark-bg border border-dark-border rounded-lg px-3 py-2.5
+                       text-white text-sm placeholder-gray-600
+                       focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/20
+                       transition-all;
+            }
+            .btn-primary {
+                @apply bg-primary hover:bg-primaryHover text-white text-sm font-medium
+                       py-2.5 px-5 rounded-lg transition-colors
+                       flex items-center justify-center gap-2
+                       active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed;
+            }
+            .btn-ghost {
+                @apply border border-dark-border hover:border-gray-600 text-gray-400 hover:text-white
+                       text-sm font-medium py-2.5 px-4 rounded-lg transition-colors;
+            }
+            .section-label {
+                @apply text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-4;
+            }
+        }
+    </style>
+    <link rel="stylesheet" href="/static/index.css">
+</head>
+
+<body class="bg-dark-bg text-gray-100 min-h-screen font-sans antialiased selection:bg-primary/30">
+
+    <div class="max-w-2xl mx-auto px-4 py-10">
+
+        <!-- Header -->
+        <header class="flex items-center justify-between mb-8">
+            <div class="flex items-center gap-2.5">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                    class="text-primary shrink-0">
+                    <path d="m22 2-7 20-4-9-9-4Z"/>
+                    <path d="M22 2 11 13"/>
+                </svg>
+                <span class="text-base font-semibold text-white tracking-tight">TG Parser</span>
+            </div>
+
+            <div id="auth-status"
+                class="flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-full border transition-all
+                {% if authorized %}text-green-400 border-green-500/20 bg-green-500/5
+                {% else %}text-amber-400 border-amber-500/20 bg-amber-500/5{% endif %}">
+                <span class="relative flex h-2 w-2">
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75
+                        {% if authorized %}bg-green-400{% else %}bg-amber-400{% endif %}"></span>
+                    <span class="relative inline-flex rounded-full h-2 w-2
+                        {% if authorized %}bg-green-500{% else %}bg-amber-500{% endif %}"></span>
+                </span>
+                <span id="auth-text">{% if authorized %}Active Session{% else %}Require Auth{% endif %}</span>
+            </div>
+        </header>
+
+        <main class="space-y-4">
+
+            <!-- Auth Card -->
+            <section id="auth-section"
+                class="bg-dark-card border border-dark-border rounded-xl p-6
+                {% if authorized %}hidden{% endif %}">
+
+                <!-- Step indicator -->
+                <div class="flex items-center gap-2 mb-6">
+                    <span class="step-dot active" id="step-dot-1">1</span>
+                    <span class="step-line"></span>
+                    <span class="step-dot" id="step-dot-2">2</span>
+                    <span class="step-line"></span>
+                    <span class="step-dot" id="step-dot-3">3</span>
+                </div>
+
+                <!-- Step 1: Request code -->
+                <div id="step-send-code">
+                    <p class="text-sm font-medium text-white mb-1">Connect your Telegram account</p>
+                    <p class="text-xs text-gray-500 mb-5 leading-relaxed">
+                        Your API credentials are loaded from
+                        <code class="text-primary bg-primary/10 px-1 py-0.5 rounded">.env</code>.
+                        We'll send a login code to your Telegram app.
+                    </p>
+                    <button id="btn-request-code" class="btn-primary">
+                        Send Login Code
+                    </button>
+                </div>
+
+                <!-- Step 2: Verify code -->
+                <div id="step-verify-code" class="hidden animate-fade-in">
+                    <p class="text-sm font-medium text-white mb-1">Enter verification code</p>
+                    <p class="text-xs text-gray-500 mb-4">Check your Telegram app for the code.</p>
+                    <div class="flex gap-2">
+                        <input type="text" id="input-code" placeholder="e.g. 12345"
+                            class="input-field" autocomplete="off">
+                        <button id="btn-submit-code" class="btn-primary whitespace-nowrap">Verify</button>
+                    </div>
+                </div>
+
+                <!-- Step 3: 2FA -->
+                <div id="step-2fa" class="hidden animate-fade-in">
+                    <p class="text-sm font-medium text-amber-400 mb-1">Two-step verification</p>
+                    <p class="text-xs text-gray-500 mb-4">Enter your Telegram cloud password.</p>
+                    <div class="flex gap-2">
+                        <input type="password" id="input-2fa" placeholder="Cloud password"
+                            class="input-field">
+                        <button id="btn-submit-2fa"
+                            class="btn-primary whitespace-nowrap !bg-amber-600 hover:!bg-amber-700">Unlock</button>
+                    </div>
+                </div>
+
+            </section>
+
+            <!-- Settings Card -->
+            <section id="settings-section"
+                class="bg-dark-card border border-dark-border rounded-xl p-6 transition-all
+                {% if not authorized %}opacity-40 pointer-events-none{% endif %}">
+
+                <!-- Notifications subsection -->
+                <p class="section-label">Notifications</p>
+                <div class="space-y-4">
+
+                    <div>
+                        <div class="flex items-center gap-1.5 mb-1.5">
+                            <label class="text-xs text-gray-400">Webhook URL</label>
+                            <button onclick="toggleHelp('help-webhook')" class="help-btn">?</button>
+                        </div>
+                        <div id="help-webhook" class="hidden help-box mb-2">
+                            <p class="help-title">Getting your n8n Webhook URL</p>
+                            <p>1. Open n8n and create a new workflow</p>
+                            <p>2. Add a <span class="text-gray-200">Webhook</span> node as the trigger</p>
+                            <p>3. Set the HTTP method to <span class="text-gray-200">POST</span></p>
+                            <p>4. Copy the <span class="text-gray-200">Webhook URL</span> shown in the node — paste it here</p>
+                            <p>5. Use the <span class="text-gray-200">Test</span> button to verify it works</p>
+                        </div>
+                        <div class="flex gap-2">
+                            <input type="url" id="input-webhook" class="input-field"
+                                placeholder="https://n8n.example.com/webhook/..."
+                                value="{{ settings.webhook_url }}">
+                            <button id="btn-test-webhook" class="btn-ghost whitespace-nowrap">Test</button>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                            <div class="flex items-center gap-1.5 mb-1.5">
+                                <label class="text-xs text-gray-400">Telegram Bot Token</label>
+                                <button onclick="toggleHelp('help-bot-token')" class="help-btn">?</button>
+                            </div>
+                            <div id="help-bot-token" class="hidden help-box mb-2">
+                                <p class="help-title">Creating a bot with @BotFather</p>
+                                <p>1. Open <span class="text-gray-200">@BotFather</span> in Telegram</p>
+                                <p>2. Send <span class="text-gray-200">/newbot</span></p>
+                                <p>3. Choose a name and username for your bot</p>
+                                <p>4. Copy the token BotFather gives you — looks like <span class="text-gray-200">1234567890:AAH...</span></p>
+                            </div>
+                            <input type="text" id="input-tg-bot-token" class="input-field"
+                                placeholder="1234567890:AAH..."
+                                value="{{ settings.tg_bot_token }}">
+                        </div>
+                        <div>
+                            <div class="flex items-center gap-1.5 mb-1.5">
+                                <label class="text-xs text-gray-400">Telegram Chat ID</label>
+                                <button onclick="toggleHelp('help-chat-id')" class="help-btn">?</button>
+                            </div>
+                            <div id="help-chat-id" class="hidden help-box mb-2">
+                                <p class="help-title">Finding your Chat ID</p>
+                                <p><span class="text-gray-200">Personal chat:</span> message <span class="text-gray-200">@userinfobot</span> — it replies with your ID</p>
+                                <p><span class="text-gray-200">Group or channel:</span> add your bot to the chat, then forward any message to <span class="text-gray-200">@userinfobot</span> — copy the chat ID from the reply</p>
+                                <p>Group IDs start with <span class="text-gray-200">-100...</span></p>
+                            </div>
+                            <input type="text" id="input-tg-chat-id" class="input-field"
+                                placeholder="-100123456789"
+                                value="{{ settings.tg_chat_id }}">
+                        </div>
+                    </div>
+                </div>
+
+                <hr class="border-dark-border my-6">
+
+                <!-- Monitoring subsection -->
+                <p class="section-label">Monitoring</p>
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+
+                    <!-- Channels -->
+                    <div>
+                        <div class="flex items-center gap-1.5 mb-1.5">
+                            <label class="text-xs text-gray-400">Target Channels</label>
+                            <button onclick="toggleHelp('help-channels')" class="help-btn">?</button>
+                        </div>
+                        <div id="help-channels" class="hidden help-box mb-2">
+                            <p class="help-title">Adding channels to monitor</p>
+                            <p><span class="text-gray-200">Public channels:</span> use the username without @ — e.g. <span class="text-gray-200">durov</span></p>
+                            <p><span class="text-gray-200">Private channels/groups:</span> forward any message from the chat to <span class="text-gray-200">@userinfobot</span> — it replies with the numeric ID</p>
+                            <p>Numeric IDs look like <span class="text-gray-200">-1001234567890</span></p>
+                            <p>Your account must be a <span class="text-gray-200">member</span> of the channel to monitor it</p>
+                        </div>
+                        <ul id="list-channels"
+                            class="mb-2 space-y-1 max-h-36 overflow-y-auto custom-scrollbar"></ul>
+                        <div class="flex gap-2">
+                            <input type="text" id="input-new-channel" class="input-field"
+                                placeholder="username or -100...">
+                            <button onclick="addListItem('channels')"
+                                class="btn-ghost px-3 text-lg leading-none">+</button>
+                        </div>
+                    </div>
+
+                    <!-- Keywords -->
+                    <div>
+                        <div class="flex items-center justify-between mb-1.5">
+                            <label class="block text-xs text-gray-400">Keywords</label>
+                            <button id="btn-open-keywords"
+                                class="text-xs text-primary hover:text-blue-400 font-medium transition-colors">
+                                Manage →
+                            </button>
+                        </div>
+                        <div id="keywords-preview"
+                            class="flex flex-wrap gap-1.5 min-h-[2.5rem] items-start content-start py-0.5">
+                            <!-- populated by JS -->
+                        </div>
+                    </div>
+                </div>
+
+                <button id="btn-save-settings" class="btn-primary w-full mt-6">
+                    Save Settings
+                </button>
+
+            </section>
+
+            <!-- Activity Log -->
+            <section class="pt-2">
+                <div class="flex items-center justify-between mb-3 px-1">
+                    <p class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Recent Matches</p>
+                    <span id="events-count" class="text-xs text-gray-600"></span>
+                </div>
+                <ul id="events-list" class="space-y-2 max-h-[28rem] overflow-y-auto custom-scrollbar">
+                    <li id="events-empty" class="text-xs text-gray-600 text-center py-8">
+                        No matches yet — the log updates automatically.
+                    </li>
+                </ul>
+            </section>
+
+        </main>
+    </div>
+
+    <!-- Inject initial data -->
+    <script type="application/json" id="initial-data">
+        {"channels":{{settings.channels|tojson|safe}},"keywords":{{settings.keywords|tojson|safe}},"webhook_url":"{{settings.webhook_url}}","tg_bot_token":"{{settings.tg_bot_token}}","tg_chat_id":"{{settings.tg_chat_id}}"}
+    </script>
+    <!-- Keywords Modal -->
+    <div id="keywords-modal" class="hidden fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4">
+        <div id="keywords-backdrop" class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
+        <div class="relative bg-dark-card border border-dark-border rounded-2xl p-6 w-full max-w-2xl shadow-2xl animate-fade-in">
+
+            <!-- Header -->
+            <div class="flex items-center justify-between mb-5">
+                <p class="text-sm font-semibold text-white">Manage Keywords</p>
+                <button id="btn-close-keywords"
+                    class="text-gray-500 hover:text-white transition-colors w-7 h-7 flex items-center justify-center rounded-lg hover:bg-white/5">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+                    </svg>
+                </button>
+            </div>
+
+            <!-- Guide -->
+            <div class="bg-primary/5 border border-primary/15 rounded-xl px-4 py-3.5 mb-5 space-y-1.5">
+                <p class="text-xs font-semibold text-primary mb-2">How keywords work</p>
+                <p class="text-xs text-gray-400">• Matching is <span class="text-gray-200">case-insensitive</span> — "Bitcoin" catches "bitcoin", "BITCOIN", "BiTcOiN"</p>
+                <p class="text-xs text-gray-400">• Use <span class="text-gray-200">phrases</span> for precision — "buy btc" won't trigger on "sell btc"</p>
+                <p class="text-xs text-gray-400">• <span class="text-gray-200">Shorter keywords</span> match more broadly, longer ones are more precise</p>
+                <p class="text-xs text-gray-400">• Separate multiple keywords with <span class="text-gray-200">commas</span> to add them all at once</p>
+            </div>
+
+            <!-- Keyword pills -->
+            <div id="modal-keywords-list"
+                class="flex flex-wrap gap-1.5 min-h-[4rem] max-h-72 overflow-y-auto custom-scrollbar mb-4 content-start">
+                <!-- populated by JS -->
+            </div>
+
+            <!-- Input -->
+            <div class="flex gap-2">
+                <input type="text" id="input-modal-keyword" class="input-field"
+                    placeholder="e.g. crypto, buy signal, airdrop">
+                <button id="btn-add-modal-keyword" class="btn-primary whitespace-nowrap">Add</button>
+            </div>
+            <p class="text-[11px] text-gray-600 mt-2">Press Enter or click Add · Separate with commas to add multiple</p>
+
+        </div>
+    </div>
+
+    <div id="toast-container"></div>
+    <script src="/static/app.js?v=7"></script>
+
+</body>
+
+</html>
