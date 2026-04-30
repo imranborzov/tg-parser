@@ -120,7 +120,7 @@ async def process_new_message(event):
         return
 
     chat = await event.get_chat()
-    chat_id = str(chat.id)
+    chat_id = str(event.chat_id)
     chat_username = getattr(chat, 'username', '') or ''
 
     # Check if this is a channel we actually monitor (early exit before any rate logic)
