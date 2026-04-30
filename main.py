@@ -53,6 +53,7 @@ class SetupData(BaseModel):
     webhook_url: str
     tg_bot_token: str = ""
     tg_chat_id: str = ""
+    match_cooldown: int = 60
 
 class AuthData(BaseModel):
     code: str
@@ -127,7 +128,7 @@ async def api_test_webhook():
 
 @app.post("/api/settings")
 async def api_update_settings(data: SetupData):
-    await update_settings(data.channels, data.keywords, data.webhook_url, data.tg_bot_token, data.tg_chat_id)
+    await update_settings(data.channels, data.keywords, data.webhook_url, data.tg_bot_token, data.tg_chat_id, data.match_cooldown)
     return {"status": "success"}
 
 if __name__ == "__main__":

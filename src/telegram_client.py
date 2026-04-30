@@ -20,7 +20,8 @@ FLOOD_WINDOW    = 10       # seconds
 FLOOD_PAUSE     = 60       # seconds
 
 # After a keyword+channel match fires a notification, ignore the same pair for this long.
-MATCH_COOLDOWN  = 60       # seconds
+# This default is overridden at runtime by the value stored in settings.
+MATCH_COOLDOWN  = 60       # seconds (fallback only)
 
 _channel_message_times: dict[str, deque] = defaultdict(lambda: deque(maxlen=50))
 _channel_flood_until:   dict[str, float] = {}
@@ -116,6 +117,8 @@ async def process_new_message(event):
     tg_bot_token = settings.get("tg_bot_token", "")
     tg_chat_id = settings.get("tg_chat_id", "")
 
+    match_cooldown = settings.get("match_cooldown", MATCH_COOLDOWN)
+
     if not channels or not keywords or (not webhook_url and not (tg_bot_token and tg_chat_id)):
         return
 
@@ -168,10 +171,11 @@ async def process_new_message(event):
     # --- Match cooldown ---
     # Avoid notification bursts for the same keyword in the same channel.
     cooldown_key = f"{chat_id}:{matched_keyword.lower()}"
-    if now < _match_cooldowns.get(cooldown_key, 0):
-        logger.debug("Match cooldown active for '%s' in %s — skipping.", matched_keyword, chat_id)
-        return
-    _match_cooldowns[cooldown_key] = now + MATCH_COOLDOWN
+    if match_cooldown > 0:
+        if now < _match_cooldowns.get(cooldown_key, 0):
+            logger.debug("Match cooldown active for '%s' in %s — skipping.", matched_keyword, chat_id)
+            return
+        _match_cooldowns[cooldown_key] = now + match_cooldown
 
     if matched_keyword:
         # Construct the message link depending on if it's a private/public group

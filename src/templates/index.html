@@ -244,7 +244,14 @@
                     </div>
                 </div>
 
-                <button id="btn-save-settings" class="btn-primary w-full mt-6">
+                <div class="flex items-center gap-3 mt-5">
+                    <label class="text-xs text-gray-400 whitespace-nowrap">Match Cooldown</label>
+                    <input type="number" id="input-match-cooldown" class="input-field w-24" min="0"
+                        placeholder="60" value="{{ settings.match_cooldown }}">
+                    <span class="text-xs text-gray-500">seconds &nbsp;&middot;&nbsp; set to <span class="text-gray-300">0</span> to disable</span>
+                </div>
+
+                <button id="btn-save-settings" class="btn-primary w-full mt-4">
                     Save Settings
                 </button>
 
@@ -268,7 +275,7 @@
 
     <!-- Inject initial data -->
     <script type="application/json" id="initial-data">
-        {"channels":{{settings.channels|tojson|safe}},"keywords":{{settings.keywords|tojson|safe}},"webhook_url":"{{settings.webhook_url}}","tg_bot_token":"{{settings.tg_bot_token}}","tg_chat_id":"{{settings.tg_chat_id}}"}
+        {"channels":{{settings.channels|tojson|safe}},"keywords":{{settings.keywords|tojson|safe}},"webhook_url":"{{settings.webhook_url}}","tg_bot_token":"{{settings.tg_bot_token}}","tg_chat_id":"{{settings.tg_chat_id}}","match_cooldown":{{settings.match_cooldown}}}
     </script>
     <!-- Keywords Modal -->
     <div id="keywords-modal" class="hidden fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4">
@@ -314,7 +321,7 @@
     </div>
 
     <div id="toast-container"></div>
-    <script src="/static/app.js?v=7"></script>
+    <script src="/static/app.js?v=8"></script>
 
 </body>
 

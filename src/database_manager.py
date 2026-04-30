@@ -22,6 +22,11 @@ async def init_db():
             except aiosqlite.OperationalError:
                 pass  # Column already exists
 
+        try:
+            await conn.execute("ALTER TABLE settings ADD COLUMN match_cooldown INTEGER DEFAULT 60")
+        except aiosqlite.OperationalError:
+            pass  # Column already exists
+
         # Ensure the single settings row exists
         async with conn.execute('SELECT COUNT(*) FROM settings') as cursor:
             (count,) = await cursor.fetchone()
@@ -48,7 +53,7 @@ async def init_db():
 async def get_settings() -> dict:
     async with aiosqlite.connect(DB_PATH) as conn:
         async with conn.execute(
-            'SELECT channels, keywords, webhook_url, tg_bot_token, tg_chat_id FROM settings WHERE id = 1'
+            'SELECT channels, keywords, webhook_url, tg_bot_token, tg_chat_id, match_cooldown FROM settings WHERE id = 1'
         ) as cursor:
             row = await cursor.fetchone()
 
@@ -59,8 +64,9 @@ async def get_settings() -> dict:
             "webhook_url": row[2],
             "tg_bot_token": row[3] or "",
             "tg_chat_id": row[4] or "",
+            "match_cooldown": row[5] if row[5] is not None else 60,
         }
-    return {"channels": [], "keywords": [], "webhook_url": "", "tg_bot_token": "", "tg_chat_id": ""}
+    return {"channels": [], "keywords": [], "webhook_url": "", "tg_bot_token": "", "tg_chat_id": "", "match_cooldown": 60}
 
 async def insert_event(channel_id: str, channel_name: str, keyword: str, message_text: str, message_link: str, matched_at: str):
     async with aiosqlite.connect(DB_PATH) as conn:
@@ -85,11 +91,11 @@ async def get_events(limit: int = 50) -> list:
             rows = await cursor.fetchall()
     return [dict(row) for row in rows]
 
-async def update_settings(channels, keywords, webhook_url, tg_bot_token="", tg_chat_id=""):
+async def update_settings(channels, keywords, webhook_url, tg_bot_token="", tg_chat_id="", match_cooldown=60):
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute('''
             UPDATE settings
-            SET channels = ?, keywords = ?, webhook_url = ?, tg_bot_token = ?, tg_chat_id = ?
+            SET channels = ?, keywords = ?, webhook_url = ?, tg_bot_token = ?, tg_chat_id = ?, match_cooldown = ?
             WHERE id = 1
-        ''', (json.dumps(channels), json.dumps(keywords), webhook_url, tg_bot_token, tg_chat_id))
+        ''', (json.dumps(channels), json.dumps(keywords), webhook_url, tg_bot_token, tg_chat_id, match_cooldown))
         await conn.commit()

@@ -30,7 +30,8 @@ let currentSettings = {
     keywords: [],
     webhook_url: "",
     tg_bot_token: "",
-    tg_chat_id: ""
+    tg_chat_id: "",
+    match_cooldown: 60
 };
 
 // --- Elements --- //
@@ -43,6 +44,7 @@ const listChannels = document.getElementById("list-channels");
 const inputWebhook = document.getElementById("input-webhook");
 const inputTgBotToken = document.getElementById("input-tg-bot-token");
 const inputTgChatId = document.getElementById("input-tg-chat-id");
+const inputMatchCooldown = document.getElementById("input-match-cooldown");
 
 // --- Auth Flow --- //
 
@@ -316,6 +318,7 @@ document.getElementById("btn-save-settings").addEventListener("click", async (e)
     currentSettings.webhook_url = inputWebhook.value.trim();
     currentSettings.tg_bot_token = inputTgBotToken.value.trim();
     currentSettings.tg_chat_id = inputTgChatId.value.trim();
+    currentSettings.match_cooldown = Math.max(0, parseInt(inputMatchCooldown.value) || 0);
 
     btn.innerHTML = `<span class="flex items-center gap-2">Saving...</span>`;
     try {
