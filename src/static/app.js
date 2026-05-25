@@ -30,6 +30,7 @@ let instances = [];
 let currentSettings = {
     channels: [],
     keywords: [],
+    excluded_keywords: [],
     webhook_url: "",
     tg_bot_token: "",
     tg_chat_id: "",
@@ -187,6 +188,55 @@ function renderSettings() {
 
     renderKeywordsPreview();
     renderModalKeywords();
+    renderExcluded();
+}
+
+function renderExcluded() {
+    const list = document.getElementById("excluded-list");
+    if (!list) return;
+    list.innerHTML = "";
+
+    if (!currentSettings.excluded_keywords.length) {
+        const empty = document.createElement("span");
+        empty.className = "text-xs text-gray-600";
+        empty.textContent = "No excluded words — matches won't be filtered.";
+        list.appendChild(empty);
+        return;
+    }
+
+    currentSettings.excluded_keywords.forEach((k, idx) => {
+        const pill = document.createElement("span");
+        pill.className = "flex items-center gap-1.5 text-sm bg-red-500/10 text-red-300 px-3 py-1.5 rounded-full font-medium";
+
+        const label = document.createElement("span");
+        label.textContent = k;
+
+        const btn = document.createElement("button");
+        btn.className = "text-red-300/60 hover:text-white transition-colors leading-none";
+        btn.textContent = "✕";
+        btn.addEventListener("click", () => removeListItem("excluded_keywords", idx));
+
+        pill.appendChild(label);
+        pill.appendChild(btn);
+        list.appendChild(pill);
+    });
+}
+
+function addExcluded() {
+    const input = document.getElementById("input-new-excluded");
+    const raw = input.value.trim();
+    if (!raw) return;
+    const entries = raw.split(",").map(s => s.trim()).filter(s => s.length > 0);
+    let added = 0;
+    entries.forEach(k => {
+        if (!currentSettings.excluded_keywords.includes(k)) {
+            currentSettings.excluded_keywords.push(k);
+            added++;
+        }
+    });
+    input.value = "";
+    renderSettings();
+    if (added > 0) showToast(`Added ${added} excluded word${added > 1 ? "s" : ""}.`, "success");
 }
 
 function renderKeywordsPreview() {
@@ -337,6 +387,7 @@ document.getElementById("btn-save-settings").addEventListener("click", async (e)
             body: JSON.stringify({
                 channels: currentSettings.channels,
                 keywords: currentSettings.keywords,
+                excluded_keywords: currentSettings.excluded_keywords,
                 webhook_url: currentSettings.webhook_url,
                 tg_bot_token: currentSettings.tg_bot_token,
                 tg_chat_id: currentSettings.tg_chat_id,
@@ -355,6 +406,12 @@ document.getElementById("btn-save-settings").addEventListener("click", async (e)
 // Enter key support on channel input
 document.getElementById("input-new-channel").addEventListener("keydown", (e) => {
     if (e.key === "Enter") addListItem("channels");
+});
+
+// Excluded words input
+document.getElementById("btn-add-excluded").addEventListener("click", addExcluded);
+document.getElementById("input-new-excluded").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") addExcluded();
 });
 
 // --- Instances --- //
@@ -387,6 +444,7 @@ async function loadInstanceSettings(id) {
     currentSettings = {
         channels: data.channels || [],
         keywords: data.keywords || [],
+        excluded_keywords: data.excluded_keywords || [],
         webhook_url: data.webhook_url || "",
         tg_bot_token: data.tg_bot_token || "",
         tg_chat_id: data.tg_chat_id || "",

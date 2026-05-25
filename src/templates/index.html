@@ -263,6 +263,27 @@
                     </div>
                 </div>
 
+                <!-- Excluded words -->
+                <div class="mt-5">
+                    <div class="flex items-center gap-1.5 mb-1.5">
+                        <label class="text-xs text-gray-400">Excluded Words</label>
+                        <button onclick="toggleHelp('help-excluded')" class="help-btn">?</button>
+                    </div>
+                    <div id="help-excluded" class="hidden help-box mb-2">
+                        <p class="help-title">Filtering out false matches</p>
+                        <p>If a message contains <span class="text-gray-200">any</span> excluded word, it won't trigger — even if a keyword matched.</p>
+                        <p>Example: keyword <span class="text-gray-200">rent</span> + excluded <span class="text-gray-200">car</span> → "rent a car" is skipped, "apartment for rent" still fires.</p>
+                        <p>Matching is <span class="text-gray-200">case-insensitive</span>. Separate multiple with commas to add them all at once.</p>
+                    </div>
+                    <div id="excluded-list"
+                        class="flex flex-wrap gap-1.5 min-h-[2.5rem] items-start content-start py-0.5 mb-2"></div>
+                    <div class="flex gap-2">
+                        <input type="text" id="input-new-excluded" class="input-field"
+                            placeholder="e.g. car, scooter, bike">
+                        <button id="btn-add-excluded" class="btn-ghost px-3 text-lg leading-none">+</button>
+                    </div>
+                </div>
+
                 <div class="flex items-center gap-3 mt-5">
                     <label class="text-xs text-gray-400 whitespace-nowrap">Match Cooldown</label>
                     <input type="number" id="input-match-cooldown" class="input-field w-24" min="0"
@@ -336,7 +357,7 @@
     </div>
 
     <div id="toast-container"></div>
-    <script src="/static/app.js?v=9"></script>
+    <script src="/static/app.js?v=10"></script>
 
 </body>
 

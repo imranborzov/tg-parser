@@ -184,6 +184,7 @@ async def process_new_message(event):
 
 async def _dispatch_for_instance(inst, now, chat_id, channel_name, message_text, message_link, event):
     keywords = inst.get("keywords", [])
+    excluded_keywords = inst.get("excluded_keywords", [])
     webhook_url = inst.get("webhook_url", "")
     tg_bot_token = inst.get("tg_bot_token", "")
     tg_chat_id = inst.get("tg_chat_id", "")
@@ -193,8 +194,21 @@ async def _dispatch_for_instance(inst, now, chat_id, channel_name, message_text,
     if not keywords or (not webhook_url and not (tg_bot_token and tg_chat_id)):
         return
 
-    matched_keyword = next((kw for kw in keywords if kw.lower() in message_text.lower()), None)
+    text_lower = message_text.lower()
+
+    matched_keyword = next((kw for kw in keywords if kw.lower() in text_lower), None)
     if not matched_keyword:
+        return
+
+    # --- Exclusion filter ---
+    # If any excluded word appears in the message, suppress the match entirely.
+    excluded_hit = next(
+        (ex for ex in excluded_keywords if ex.strip() and ex.lower() in text_lower),
+        None,
+    )
+    if excluded_hit:
+        logger.debug("Excluded word '%s' present — suppressing match '%s' in %s (instance %s).",
+                     excluded_hit, matched_keyword, chat_id, instance_id)
         return
 
     # --- Match cooldown (per instance + channel + keyword) ---
