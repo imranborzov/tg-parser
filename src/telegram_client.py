@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import asyncio
 import logging
@@ -210,6 +211,26 @@ async def is_authorized(instance_id: int) -> bool:
 
 # --- Message routing (per instance) ---
 
+_word_pattern_cache: dict[str, "re.Pattern"] = {}
+
+
+def _matches_whole_word(text_lower: str, term: str) -> bool:
+    """True if `term` appears in `text_lower` as a whole word/phrase, i.e. not
+    glued to surrounding letters or digits. Case-insensitive and Unicode-aware
+    (works for Cyrillic), so "ремонт" matches "нужен ремонт" but not
+    "авторемонт". Multi-word phrases are matched as-is.
+    """
+    term = (term or "").strip().lower()
+    if not term:
+        return False
+    pattern = _word_pattern_cache.get(term)
+    if pattern is None:
+        # (?<!\w) / (?!\w) require a non-word char (or string edge) on each side.
+        pattern = re.compile(r"(?<!\w)" + re.escape(term) + r"(?!\w)", re.UNICODE)
+        _word_pattern_cache[term] = pattern
+    return pattern.search(text_lower) is not None
+
+
 def _channel_in_list(channels, chat_id: str, chat_username: str) -> bool:
     """True if this chat matches any entry in an instance's channel list."""
     for c in channels:
@@ -281,14 +302,15 @@ async def _dispatch_for_instance(inst, now, chat_id, channel_name, message_text,
 
     text_lower = message_text.lower()
 
-    matched_keyword = next((kw for kw in keywords if kw.lower() in text_lower), None)
+    matched_keyword = next((kw for kw in keywords if _matches_whole_word(text_lower, kw)), None)
     if not matched_keyword:
         return
 
     # --- Exclusion filter ---
-    # If any excluded word appears in the message, suppress the match entirely.
+    # If any excluded word appears (as a whole word) in the message, suppress
+    # the match entirely.
     excluded_hit = next(
-        (ex for ex in excluded_keywords if ex.strip() and ex.lower() in text_lower),
+        (ex for ex in excluded_keywords if _matches_whole_word(text_lower, ex)),
         None,
     )
     if excluded_hit:
