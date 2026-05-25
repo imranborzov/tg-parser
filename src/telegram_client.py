@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import asyncio
 import logging
@@ -7,8 +8,8 @@ from collections import defaultdict, deque
 import httpx
 from typing import Optional
 from telethon import TelegramClient, events, errors
-from src.config import API_ID, API_HASH, PHONE_NUMBER
-from src.database_manager import get_all_instances_full, insert_event
+from src.config import DATA_DIR
+from src.database_manager import get_instance, list_instances, insert_event
 
 logger = logging.getLogger(__name__)
 
@@ -23,91 +24,212 @@ FLOOD_PAUSE     = 60       # seconds
 # This default is overridden at runtime by the value stored in settings.
 MATCH_COOLDOWN  = 60       # seconds (fallback only)
 
+# Flood/cooldown state is keyed per instance (e.g. "<instance_id>:<chat_id>") so
+# instances never interfere with each other.
 _channel_message_times: dict[str, deque] = defaultdict(lambda: deque(maxlen=50))
 _channel_flood_until:   dict[str, float] = {}
 _match_cooldowns:       dict[str, float] = {}
 
-# --- Active client ---
-client: Optional[TelegramClient] = None
-_bg_task: Optional[asyncio.Task] = None
-SESSION_FILE = str(Path(__file__).parent / "database" / "session")
+# --- One Telegram client per instance ---
+DB_DIR = DATA_DIR
+LEGACY_SESSION = DB_DIR / "session.session"  # pre-multi-account single session
+
+_clients:  dict[int, TelegramClient] = {}
+_bg_tasks: dict[int, asyncio.Task] = {}
 
 
-def _start_bg_task(c: TelegramClient) -> None:
-    """Start run_until_disconnected as a background task, skipping if one is already live."""
-    global _bg_task
-    if _bg_task is None or _bg_task.done():
-        _bg_task = asyncio.create_task(c.run_until_disconnected())
+def _session_path(instance_id: int) -> str:
+    """Telethon session file stem for an instance (file is <stem>.session)."""
+    return str(DB_DIR / f"session_{instance_id}")
 
-async def setup_client():
-    global client
-    if client is None:
-        client = TelegramClient(SESSION_FILE, int(API_ID), API_HASH)
-        
-        # Add message handler
-        @client.on(events.NewMessage)
-        async def my_event_handler(event):
-            await process_new_message(event)
 
+def _has_credentials(inst: dict) -> bool:
+    if not inst:
+        return False
+    api_id = str(inst.get("api_id", "")).strip()
+    api_hash = str(inst.get("api_hash", "")).strip()
+    phone = str(inst.get("phone", "")).strip()
+    return bool(api_id and api_id.isdigit() and api_hash and phone)
+
+
+def _build_client(inst: dict) -> TelegramClient:
+    """Construct a TelegramClient for an instance and bind its message handler."""
+    instance_id = inst["id"]
+    client = TelegramClient(_session_path(instance_id), int(inst["api_id"]), inst["api_hash"])
+
+    async def _handler(event, _iid=instance_id):
+        await process_message_for_instance(_iid, event)
+
+    client.add_event_handler(_handler, events.NewMessage)
     return client
 
-async def get_client():
-    if client is None:
-        await setup_client()
+
+async def get_client(instance_id: int) -> Optional[TelegramClient]:
+    """Return (building if needed) the client for an instance, or None if it has
+    no usable credentials yet."""
+    client = _clients.get(instance_id)
+    if client is not None:
+        return client
+    inst = await get_instance(instance_id)
+    if not _has_credentials(inst):
+        return None
+    client = _build_client(inst)
+    _clients[instance_id] = client
     return client
 
-async def start_client_bg():
-    c = await get_client()
-    if not c.is_connected():
-        await c.connect()
-    
-    if await c.is_user_authorized():
-        logger.info("Telegram client authorized. Starting background task...")
-        _start_bg_task(c)
-    else:
-        logger.warning("Telegram client not authorized. Authenticate via the UI.")
 
-async def stop_client():
-    global client, _bg_task
-    if _bg_task is not None and not _bg_task.done():
-        _bg_task.cancel()
-        _bg_task = None
+def _start_bg_task(instance_id: int, client: TelegramClient) -> None:
+    task = _bg_tasks.get(instance_id)
+    if task is None or task.done():
+        _bg_tasks[instance_id] = asyncio.create_task(client.run_until_disconnected())
+
+
+async def _adopt_legacy_session():
+    """Migration: hand the old single `session.session` to the oldest instance so
+    upgrades stay logged in instead of forcing a re-auth."""
+    if not LEGACY_SESSION.exists():
+        return
+    instances = await list_instances()
+    if not instances:
+        return
+    target_id = instances[0]["id"]
+    target = Path(_session_path(target_id) + ".session")
+    if target.exists():
+        return  # Instance already has its own session
+    try:
+        LEGACY_SESSION.rename(target)
+        logger.info("Adopted legacy session for instance %s.", target_id)
+    except OSError as e:
+        logger.warning("Could not adopt legacy session: %s", e)
+
+
+async def start_all_clients_bg():
+    """On boot, connect every instance that has credentials and start listening
+    for those already authorized."""
+    await _adopt_legacy_session()
+    for meta in await list_instances():
+        instance_id = meta["id"]
+        try:
+            client = await get_client(instance_id)
+            if client is None:
+                continue
+            if not client.is_connected():
+                await client.connect()
+            if await client.is_user_authorized():
+                logger.info("Instance %s authorized — listening.", instance_id)
+                _start_bg_task(instance_id, client)
+            else:
+                logger.info("Instance %s has credentials but is not authorized yet.", instance_id)
+        except Exception as e:
+            logger.error("Failed to start client for instance %s: %s", instance_id, e)
+
+
+async def reset_client(instance_id: int):
+    """Tear down an instance's client (e.g. after credentials change) so the next
+    use rebuilds it. The session file is left in place."""
+    task = _bg_tasks.pop(instance_id, None)
+    if task is not None and not task.done():
+        task.cancel()
+    client = _clients.pop(instance_id, None)
     if client is not None and client.is_connected():
-        await client.disconnect()
-        logger.info("Telegram client disconnected.")
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
-async def send_code():
-    c = await get_client()
-    if not c.is_connected():
-        await c.connect()
-    result = await c.send_code_request(PHONE_NUMBER)
+
+async def delete_client(instance_id: int):
+    """Stop an instance's client and remove its session file(s)."""
+    await reset_client(instance_id)
+    stem = _session_path(instance_id)
+    for suffix in (".session", ".session-journal"):
+        try:
+            os.remove(stem + suffix)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.warning("Could not remove session file %s%s: %s", stem, suffix, e)
+
+
+async def stop_all_clients():
+    for instance_id in list(_clients.keys()):
+        await reset_client(instance_id)
+
+
+# --- Per-instance auth flow ---
+
+async def send_code(instance_id: int):
+    client = await get_client(instance_id)
+    if client is None:
+        raise ValueError("Set this instance's API ID, API hash, and phone first.")
+    if not client.is_connected():
+        await client.connect()
+    inst = await get_instance(instance_id)
+    result = await client.send_code_request(inst["phone"])
     return result.phone_code_hash
 
-async def verify_code(code: str, phone_code_hash: str):
-    c = await get_client()
+
+async def verify_code(instance_id: int, code: str, phone_code_hash: str):
+    client = await get_client(instance_id)
+    if client is None:
+        return {"status": "error", "message": "Credentials not configured."}
+    inst = await get_instance(instance_id)
     try:
-        await c.sign_in(PHONE_NUMBER, code, phone_code_hash=phone_code_hash)
-        _start_bg_task(c)
+        await client.sign_in(inst["phone"], code, phone_code_hash=phone_code_hash)
+        _start_bg_task(instance_id, client)
         return {"status": "success"}
     except errors.SessionPasswordNeededError:
         return {"status": "2fa_required"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-async def verify_2fa(password: str):
-    c = await get_client()
+
+async def verify_2fa(instance_id: int, password: str):
+    client = await get_client(instance_id)
+    if client is None:
+        return {"status": "error", "message": "Credentials not configured."}
     try:
-        await c.sign_in(password=password)
-        _start_bg_task(c)
+        await client.sign_in(password=password)
+        _start_bg_task(instance_id, client)
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-async def is_authorized():
-    c = await get_client()
-    if not c.is_connected():
-        await c.connect()
-    return await c.is_user_authorized()
+
+async def is_authorized(instance_id: int) -> bool:
+    client = await get_client(instance_id)
+    if client is None:
+        return False
+    try:
+        if not client.is_connected():
+            await client.connect()
+        return await client.is_user_authorized()
+    except Exception as e:
+        logger.error("Authorization check failed for instance %s: %s", instance_id, e)
+        return False
+
+
+# --- Message routing (per instance) ---
+
+_word_pattern_cache: dict[str, "re.Pattern"] = {}
+
+
+def _matches_whole_word(text_lower: str, term: str) -> bool:
+    """True if `term` appears in `text_lower` as a whole word/phrase, i.e. not
+    glued to surrounding letters or digits. Case-insensitive and Unicode-aware
+    (works for Cyrillic), so "ремонт" matches "нужен ремонт" but not
+    "авторемонт". Multi-word phrases are matched as-is.
+    """
+    term = (term or "").strip().lower()
+    if not term:
+        return False
+    pattern = _word_pattern_cache.get(term)
+    if pattern is None:
+        # (?<!\w) / (?!\w) require a non-word char (or string edge) on each side.
+        pattern = re.compile(r"(?<!\w)" + re.escape(term) + r"(?!\w)", re.UNICODE)
+        _word_pattern_cache[term] = pattern
+    return pattern.search(text_lower) is not None
+
 
 def _channel_in_list(channels, chat_id: str, chat_username: str) -> bool:
     """True if this chat matches any entry in an instance's channel list."""
@@ -120,53 +242,40 @@ def _channel_in_list(channels, chat_id: str, chat_username: str) -> bool:
     return False
 
 
-async def process_new_message(event):
-    """Route a single incoming message through every configured instance.
-
-    There is one Telegram connection (one account), so each message is offered
-    to every instance independently: an instance only acts on it if the channel
-    is in *its* list and the text matches *its* keywords. Cooldowns and the
-    activity log are tracked per instance, so instances stay fully isolated.
-    """
-    instances = await get_all_instances_full()
-    if not instances:
+async def process_message_for_instance(instance_id: int, event):
+    """Handle one incoming message for a single instance's client."""
+    inst = await get_instance(instance_id)
+    if not inst:
         return
 
     chat = await event.get_chat()
     chat_id = str(event.chat_id)
     chat_username = getattr(chat, 'username', '') or ''
 
-    # Is this channel monitored by *any* instance? (early exit before rate logic)
-    relevant = [
-        inst for inst in instances
-        if _channel_in_list(inst.get("channels", []), chat_id, chat_username)
-    ]
-    if not relevant:
+    if not _channel_in_list(inst.get("channels", []), chat_id, chat_username):
         return
 
     now = time.monotonic()
+    flood_key = f"{instance_id}:{chat_id}"
 
-    # --- Flood guard (per channel, shared across instances) ---
-    flood_until = _channel_flood_until.get(chat_id, 0)
-    if now < flood_until:
-        logger.debug("Flood guard active for %s — dropping message.", chat_id)
+    # --- Flood guard (per instance + channel) ---
+    if now < _channel_flood_until.get(flood_key, 0):
+        logger.debug("Flood guard active for %s — dropping message.", flood_key)
         return
 
-    times = _channel_message_times[chat_id]
+    times = _channel_message_times[flood_key]
     times.append(now)
     recent = sum(1 for t in times if now - t < FLOOD_WINDOW)
     if recent >= FLOOD_THRESHOLD:
-        _channel_flood_until[chat_id] = now + FLOOD_PAUSE
+        _channel_flood_until[flood_key] = now + FLOOD_PAUSE
         logger.warning(
-            "Flood guard triggered for channel %s (%d msgs in %ds). "
-            "Pausing processing for %ds.",
-            chat_id, recent, FLOOD_WINDOW, FLOOD_PAUSE
+            "Flood guard triggered for %s (%d msgs in %ds). Pausing %ds.",
+            flood_key, recent, FLOOD_WINDOW, FLOOD_PAUSE
         )
         return
 
     message_text = event.message.message or ""
 
-    # Build the message link once — it's the same for every instance.
     if chat_id.startswith("-100"):
         message_link = f"https://t.me/c/{chat_id[4:]}/{event.message.id}"
     elif getattr(chat, 'username', None):
@@ -176,10 +285,7 @@ async def process_new_message(event):
 
     channel_name = getattr(chat, 'title', None) or getattr(chat, 'username', 'Unknown')
 
-    for inst in relevant:
-        await _dispatch_for_instance(
-            inst, now, chat_id, channel_name, message_text, message_link, event
-        )
+    await _dispatch_for_instance(inst, now, chat_id, channel_name, message_text, message_link, event)
 
 
 async def _dispatch_for_instance(inst, now, chat_id, channel_name, message_text, message_link, event):
@@ -196,14 +302,15 @@ async def _dispatch_for_instance(inst, now, chat_id, channel_name, message_text,
 
     text_lower = message_text.lower()
 
-    matched_keyword = next((kw for kw in keywords if kw.lower() in text_lower), None)
+    matched_keyword = next((kw for kw in keywords if _matches_whole_word(text_lower, kw)), None)
     if not matched_keyword:
         return
 
     # --- Exclusion filter ---
-    # If any excluded word appears in the message, suppress the match entirely.
+    # If any excluded word appears (as a whole word) in the message, suppress
+    # the match entirely.
     excluded_hit = next(
-        (ex for ex in excluded_keywords if ex.strip() and ex.lower() in text_lower),
+        (ex for ex in excluded_keywords if _matches_whole_word(text_lower, ex)),
         None,
     )
     if excluded_hit:
@@ -248,6 +355,7 @@ async def _dispatch_for_instance(inst, now, chat_id, channel_name, message_text,
     if tg_bot_token and tg_chat_id:
         asyncio.create_task(send_to_tg_bot(tg_bot_token, tg_chat_id, payload))
 
+
 async def send_to_webhook(url: str, payload: dict):
     try:
         async with httpx.AsyncClient(timeout=5) as http:
@@ -257,11 +365,13 @@ async def send_to_webhook(url: str, payload: dict):
     except Exception as e:
         logger.error("Failed to send webhook: %s", e)
 
+
 def _escape_md(text: str) -> str:
     """Escape special characters for Telegram Markdown v1."""
     for ch in ("*", "_", "`", "["):
         text = text.replace(ch, f"\\{ch}")
     return text
+
 
 async def send_to_tg_bot(bot_token: str, chat_id: str, payload: dict):
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -277,14 +387,14 @@ async def send_to_tg_bot(bot_token: str, chat_id: str, payload: dict):
         f"🔗 *Link:* {payload.get('message_link', '')}\n\n"
         f"{payload.get('message_text', '')}"
     )
-    
+
     data = {
         "chat_id": chat_id_str,
         "text": text,
         "parse_mode": "Markdown",
         "disable_web_page_preview": True
     }
-    
+
     try:
         async with httpx.AsyncClient(timeout=5) as http:
             response = await http.post(url, json=data)

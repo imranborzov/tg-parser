@@ -68,15 +68,12 @@
 
             <div id="auth-status"
                 class="flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-full border transition-all
-                {% if authorized %}text-green-400 border-green-500/20 bg-green-500/5
-                {% else %}text-amber-400 border-amber-500/20 bg-amber-500/5{% endif %}">
+                text-amber-400 border-amber-500/20 bg-amber-500/10">
                 <span class="relative flex h-2 w-2">
-                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75
-                        {% if authorized %}bg-green-400{% else %}bg-amber-400{% endif %}"></span>
-                    <span class="relative inline-flex rounded-full h-2 w-2
-                        {% if authorized %}bg-green-500{% else %}bg-amber-500{% endif %}"></span>
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 bg-amber-400"></span>
+                    <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
                 </span>
-                <span id="auth-text">{% if authorized %}Active Session{% else %}Require Auth{% endif %}</span>
+                <span id="auth-text">Not connected</span>
             </div>
         </header>
 
@@ -84,8 +81,7 @@
 
             <!-- Instance Switcher -->
             <section id="instance-bar"
-                class="bg-dark-card border border-dark-border rounded-xl px-4 py-3
-                {% if not authorized %}opacity-40 pointer-events-none{% endif %}">
+                class="bg-dark-card border border-dark-border rounded-xl px-4 py-3">
                 <div class="flex items-center gap-2">
                     <span class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider shrink-0">Instance</span>
                     <select id="instance-select"
@@ -100,41 +96,55 @@
                         title="Delete this instance">Delete</button>
                 </div>
                 <p class="text-[11px] text-gray-600 mt-2">
-                    Each instance has its own channels, keywords, destination, and activity log — all on one Telegram account.
+                    Each instance is its own Telegram account — its own login, channels, keywords, destination, and activity log.
                 </p>
             </section>
 
-            <!-- Auth Card -->
-            <section id="auth-section"
-                class="bg-dark-card border border-dark-border rounded-xl p-6
-                {% if authorized %}hidden{% endif %}">
+            <!-- Telegram Account Card (per instance) -->
+            <section id="account-section"
+                class="bg-dark-card border border-dark-border rounded-xl p-6">
 
-                <!-- Step indicator -->
-                <div class="flex items-center gap-2 mb-6">
-                    <span class="step-dot active" id="step-dot-1">1</span>
-                    <span class="step-line"></span>
-                    <span class="step-dot" id="step-dot-2">2</span>
-                    <span class="step-line"></span>
-                    <span class="step-dot" id="step-dot-3">3</span>
+                <div class="flex items-center justify-between mb-4">
+                    <p class="section-label !mb-0">Telegram Account</p>
+                    <span id="account-badge"
+                        class="text-[11px] font-medium px-2.5 py-1 rounded-full border
+                               text-amber-400 border-amber-500/20 bg-amber-500/10">Not connected</span>
                 </div>
 
-                <!-- Step 1: Request code -->
-                <div id="step-send-code">
-                    <p class="text-sm font-medium text-white mb-1">Connect your Telegram account</p>
-                    <p class="text-xs text-gray-500 mb-5 leading-relaxed">
-                        Your API credentials are loaded from
-                        <code class="text-primary bg-primary/10 px-1 py-0.5 rounded">.env</code>.
-                        We'll send a login code to your Telegram app.
-                    </p>
-                    <button id="btn-request-code" class="btn-primary">
-                        Send Login Code
-                    </button>
+                <!-- Credentials -->
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                        <div class="flex items-center gap-1.5 mb-1.5">
+                            <label class="text-xs text-gray-400">API ID</label>
+                            <button onclick="toggleHelp('help-api')" class="help-btn">?</button>
+                        </div>
+                        <input type="text" id="input-api-id" class="input-field" placeholder="12345678">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1.5">API Hash</label>
+                        <input type="text" id="input-api-hash" class="input-field" placeholder="0123456789abcdef...">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-gray-400 mb-1.5">Phone Number</label>
+                        <input type="text" id="input-phone" class="input-field" placeholder="+15551234567">
+                    </div>
+                </div>
+                <div id="help-api" class="hidden help-box mt-2">
+                    <p class="help-title">Getting API credentials</p>
+                    <p>1. Go to <span class="text-gray-200">my.telegram.org</span> → API development tools</p>
+                    <p>2. Create an app (any name) and copy the <span class="text-gray-200">api_id</span> and <span class="text-gray-200">api_hash</span></p>
+                    <p>3. Use the phone number of the account you want this instance to monitor from</p>
+                    <p>Each instance can use a different account — fill in its own credentials here.</p>
                 </div>
 
-                <!-- Step 2: Verify code -->
-                <div id="step-verify-code" class="hidden animate-fade-in">
-                    <p class="text-sm font-medium text-white mb-1">Enter verification code</p>
-                    <p class="text-xs text-gray-500 mb-4">Check your Telegram app for the code.</p>
+                <!-- Step 1: request code -->
+                <button id="btn-request-code" class="btn-primary w-full mt-4">
+                    Save &amp; Send Login Code
+                </button>
+
+                <!-- Step 2: verify code -->
+                <div id="step-verify-code" class="hidden animate-fade-in mt-4">
+                    <p class="text-xs text-gray-500 mb-2">Enter the login code Telegram just sent to this account.</p>
                     <div class="flex gap-2">
                         <input type="text" id="input-code" placeholder="e.g. 12345"
                             class="input-field" autocomplete="off">
@@ -143,12 +153,10 @@
                 </div>
 
                 <!-- Step 3: 2FA -->
-                <div id="step-2fa" class="hidden animate-fade-in">
-                    <p class="text-sm font-medium text-amber-400 mb-1">Two-step verification</p>
-                    <p class="text-xs text-gray-500 mb-4">Enter your Telegram cloud password.</p>
+                <div id="step-2fa" class="hidden animate-fade-in mt-4">
+                    <p class="text-xs text-amber-400 mb-2">Two-step verification — enter this account's cloud password.</p>
                     <div class="flex gap-2">
-                        <input type="password" id="input-2fa" placeholder="Cloud password"
-                            class="input-field">
+                        <input type="password" id="input-2fa" placeholder="Cloud password" class="input-field">
                         <button id="btn-submit-2fa"
                             class="btn-primary whitespace-nowrap !bg-amber-600 hover:!bg-amber-700">Unlock</button>
                     </div>
@@ -158,8 +166,7 @@
 
             <!-- Settings Card -->
             <section id="settings-section"
-                class="bg-dark-card border border-dark-border rounded-xl p-6 transition-all
-                {% if not authorized %}opacity-40 pointer-events-none{% endif %}">
+                class="bg-dark-card border border-dark-border rounded-xl p-6 transition-all">
 
                 <!-- Notifications subsection -->
                 <p class="section-label">Notifications</p>
@@ -357,7 +364,7 @@
     </div>
 
     <div id="toast-container"></div>
-    <script src="/static/app.js?v=10"></script>
+    <script src="/static/app.js?v=11"></script>
 
 </body>
 

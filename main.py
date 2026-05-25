@@ -27,26 +27,29 @@ from src.database_manager import (
     get_events,
 )
 from src.telegram_client import (
-    start_client_bg,
+    start_all_clients_bg,
+    stop_all_clients,
+    reset_client,
+    delete_client,
     send_code,
     verify_code,
     verify_2fa,
     is_authorized,
-    stop_client,
     send_to_webhook,
 )
+from typing import Optional
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize SQLite database
     await init_db()
-    # Try to start telegram client in background if already authorized
-    await start_client_bg()
+    # Connect every instance with credentials; start listening for authorized ones
+    await start_all_clients_bg()
     try:
         yield
     finally:
         # Cleanup
-        await stop_client()
+        await stop_all_clients()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -64,6 +67,9 @@ class SetupData(BaseModel):
     tg_chat_id: str = ""
     match_cooldown: int = 60
     excluded_keywords: list[str] = []
+    api_id: Optional[str] = None
+    api_hash: Optional[str] = None
+    phone: Optional[str] = None
 
 class InstanceCreate(BaseModel):
     name: str = "Untitled"
@@ -81,39 +87,7 @@ class TwoFAData(BaseModel):
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
-    authorized = await is_authorized()
-    return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
-            "authorized": authorized,
-        }
-    )
-
-# --- Auth (global — one Telegram account) ---
-
-@app.post("/api/auth/send_code")
-async def api_send_code():
-    try:
-        phone_code_hash = await send_code()
-        return {"status": "success", "phone_code_hash": phone_code_hash}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-@app.post("/api/auth/verify_code")
-async def api_verify_code(data: AuthData):
-    result = await verify_code(data.code, data.phone_code_hash)
-    return result
-
-@app.post("/api/auth/verify_2fa")
-async def api_verify_2fa(data: TwoFAData):
-    result = await verify_2fa(data.password)
-    return result
-
-@app.get("/api/status")
-async def api_status():
-    authorized = await is_authorized()
-    return {"authorized": authorized}
+    return templates.TemplateResponse("index.html", {"request": request})
 
 # --- Instances ---
 
@@ -134,8 +108,18 @@ async def api_get_instance(instance_id: int):
 
 @app.post("/api/instances/{instance_id}")
 async def api_update_instance(instance_id: int, data: SetupData):
-    if await get_instance(instance_id) is None:
+    existing = await get_instance(instance_id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="Instance not found")
+
+    # Detect credential changes so we can rebuild the client only when needed
+    # (rebuilding mid-listen would drop an active connection).
+    creds_changed = (
+        (data.api_id is not None and data.api_id.strip() != (existing.get("api_id") or "")) or
+        (data.api_hash is not None and data.api_hash.strip() != (existing.get("api_hash") or "")) or
+        (data.phone is not None and data.phone.strip() != (existing.get("phone") or ""))
+    )
+
     await update_instance(
         instance_id,
         channels=data.channels,
@@ -145,7 +129,12 @@ async def api_update_instance(instance_id: int, data: SetupData):
         tg_chat_id=data.tg_chat_id,
         match_cooldown=data.match_cooldown,
         excluded_keywords=data.excluded_keywords,
+        api_id=data.api_id,
+        api_hash=data.api_hash,
+        phone=data.phone,
     )
+    if creds_changed:
+        await reset_client(instance_id)
     return {"status": "success"}
 
 @app.post("/api/instances/{instance_id}/rename")
@@ -161,8 +150,44 @@ async def api_delete_instance(instance_id: int):
         raise HTTPException(status_code=404, detail="Instance not found")
     if await count_instances() <= 1:
         raise HTTPException(status_code=400, detail="Cannot delete the last instance.")
+    await delete_client(instance_id)
     await delete_instance(instance_id)
     return {"status": "success"}
+
+# --- Per-instance auth (each instance is its own Telegram account) ---
+
+@app.get("/api/instances/{instance_id}/status")
+async def api_instance_status(instance_id: int):
+    inst = await get_instance(instance_id)
+    if inst is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    has_credentials = bool((inst.get("api_id") or "").strip()
+                           and (inst.get("api_hash") or "").strip()
+                           and (inst.get("phone") or "").strip())
+    authorized = await is_authorized(instance_id) if has_credentials else False
+    return {"authorized": authorized, "has_credentials": has_credentials}
+
+@app.post("/api/instances/{instance_id}/auth/send_code")
+async def api_send_code(instance_id: int):
+    if await get_instance(instance_id) is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    try:
+        phone_code_hash = await send_code(instance_id)
+        return {"status": "success", "phone_code_hash": phone_code_hash}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/api/instances/{instance_id}/auth/verify_code")
+async def api_verify_code(instance_id: int, data: AuthData):
+    if await get_instance(instance_id) is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    return await verify_code(instance_id, data.code, data.phone_code_hash)
+
+@app.post("/api/instances/{instance_id}/auth/verify_2fa")
+async def api_verify_2fa(instance_id: int, data: TwoFAData):
+    if await get_instance(instance_id) is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    return await verify_2fa(instance_id, data.password)
 
 @app.get("/api/instances/{instance_id}/events")
 async def api_instance_events(instance_id: int):
