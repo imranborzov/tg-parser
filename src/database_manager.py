@@ -1,7 +1,7 @@
 import json
 from datetime import datetime, timezone
 import aiosqlite
-from src.config import DB_PATH
+from src.config import DB_PATH, API_ID, API_HASH, PHONE_NUMBER
 
 DEFAULT_INSTANCE_NAME = "Default"
 
@@ -24,15 +24,24 @@ async def init_db():
                 tg_chat_id TEXT DEFAULT '',
                 match_cooldown INTEGER DEFAULT 60,
                 excluded_keywords TEXT DEFAULT '[]',
+                api_id TEXT DEFAULT '',
+                api_hash TEXT DEFAULT '',
+                phone TEXT DEFAULT '',
                 created_at TEXT
             )
         ''')
 
         # Add columns introduced after the initial instances schema (idempotent)
-        try:
-            await conn.execute("ALTER TABLE instances ADD COLUMN excluded_keywords TEXT DEFAULT '[]'")
-        except aiosqlite.OperationalError:
-            pass  # Column already exists
+        for ddl in (
+            "ALTER TABLE instances ADD COLUMN excluded_keywords TEXT DEFAULT '[]'",
+            "ALTER TABLE instances ADD COLUMN api_id TEXT DEFAULT ''",
+            "ALTER TABLE instances ADD COLUMN api_hash TEXT DEFAULT ''",
+            "ALTER TABLE instances ADD COLUMN phone TEXT DEFAULT ''",
+        ):
+            try:
+                await conn.execute(ddl)
+            except aiosqlite.OperationalError:
+                pass  # Column already exists
 
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS events (
@@ -63,10 +72,34 @@ async def init_db():
             (count,) = await cursor.fetchone()
         if count == 0:
             await conn.execute(
-                'INSERT INTO instances (name, created_at) VALUES (?, ?)',
-                (DEFAULT_INSTANCE_NAME, _now_iso()),
+                'INSERT INTO instances (name, api_id, api_hash, phone, created_at) VALUES (?, ?, ?, ?, ?)',
+                (DEFAULT_INSTANCE_NAME, API_ID or '', API_HASH or '', PHONE_NUMBER or '', _now_iso()),
             )
             await conn.commit()
+
+        # Backfill the legacy account (.env creds) onto the original instance so
+        # upgrades keep working with the existing session. Only touches the oldest
+        # instance, and only if it has no creds yet.
+        await _backfill_default_credentials(conn)
+
+
+async def _backfill_default_credentials(conn):
+    if not (API_ID and API_HASH and PHONE_NUMBER):
+        return
+    async with conn.execute(
+        'SELECT id, api_id, phone FROM instances ORDER BY id ASC LIMIT 1'
+    ) as cursor:
+        row = await cursor.fetchone()
+    if row is None:
+        return
+    inst_id, api_id, phone = row
+    if (api_id or '').strip() or (phone or '').strip():
+        return  # Already has credentials — leave it alone
+    await conn.execute(
+        'UPDATE instances SET api_id = ?, api_hash = ?, phone = ? WHERE id = ?',
+        (API_ID, API_HASH, PHONE_NUMBER, inst_id),
+    )
+    await conn.commit()
 
 
 async def _migrate_legacy_settings(conn):
@@ -98,8 +131,9 @@ async def _migrate_legacy_settings(conn):
 
     cur = await conn.execute(
         '''INSERT INTO instances
-           (name, channels, keywords, webhook_url, tg_bot_token, tg_chat_id, match_cooldown, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+           (name, channels, keywords, webhook_url, tg_bot_token, tg_chat_id, match_cooldown,
+            api_id, api_hash, phone, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
         (
             DEFAULT_INSTANCE_NAME,
             row[0] or '[]',
@@ -108,6 +142,9 @@ async def _migrate_legacy_settings(conn):
             row[3] or '',
             row[4] or '',
             row[5] if row[5] is not None else 60,
+            API_ID or '',
+            API_HASH or '',
+            PHONE_NUMBER or '',
             _now_iso(),
         ),
     )
@@ -130,6 +167,9 @@ def _instance_row_to_dict(row) -> dict:
         "tg_chat_id": row[6] or "",
         "match_cooldown": row[7] if row[7] is not None else 60,
         "excluded_keywords": json.loads(row[8]) if len(row) > 8 and row[8] else [],
+        "api_id": (row[9] or "") if len(row) > 9 else "",
+        "api_hash": (row[10] or "") if len(row) > 10 else "",
+        "phone": (row[11] or "") if len(row) > 11 else "",
     }
 
 
@@ -147,7 +187,8 @@ async def get_instance(instance_id: int):
     async with aiosqlite.connect(DB_PATH) as conn:
         async with conn.execute(
             'SELECT id, name, channels, keywords, webhook_url, tg_bot_token, '
-            'tg_chat_id, match_cooldown, excluded_keywords FROM instances WHERE id = ?',
+            'tg_chat_id, match_cooldown, excluded_keywords, api_id, api_hash, phone '
+            'FROM instances WHERE id = ?',
             (instance_id,),
         ) as cursor:
             row = await cursor.fetchone()
@@ -159,7 +200,8 @@ async def get_all_instances_full() -> list:
     async with aiosqlite.connect(DB_PATH) as conn:
         async with conn.execute(
             'SELECT id, name, channels, keywords, webhook_url, tg_bot_token, '
-            'tg_chat_id, match_cooldown, excluded_keywords FROM instances ORDER BY id ASC'
+            'tg_chat_id, match_cooldown, excluded_keywords, api_id, api_hash, phone '
+            'FROM instances ORDER BY id ASC'
         ) as cursor:
             rows = await cursor.fetchall()
     return [_instance_row_to_dict(r) for r in rows]
@@ -179,12 +221,19 @@ async def create_instance(name: str) -> dict:
 
 async def update_instance(instance_id: int, *, name=None, channels=None, keywords=None,
                           webhook_url=None, tg_bot_token=None, tg_chat_id=None,
-                          match_cooldown=None, excluded_keywords=None):
+                          match_cooldown=None, excluded_keywords=None,
+                          api_id=None, api_hash=None, phone=None):
     """Update only the provided fields of an instance."""
     fields = []
     values = []
     if name is not None:
         fields.append('name = ?'); values.append(name.strip() or "Untitled")
+    if api_id is not None:
+        fields.append('api_id = ?'); values.append(str(api_id).strip())
+    if api_hash is not None:
+        fields.append('api_hash = ?'); values.append(str(api_hash).strip())
+    if phone is not None:
+        fields.append('phone = ?'); values.append(str(phone).strip())
     if channels is not None:
         fields.append('channels = ?'); values.append(json.dumps(channels))
     if keywords is not None:

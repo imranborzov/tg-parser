@@ -34,46 +34,65 @@ let currentSettings = {
     webhook_url: "",
     tg_bot_token: "",
     tg_chat_id: "",
-    match_cooldown: 60
+    match_cooldown: 60,
+    api_id: "",
+    api_hash: "",
+    phone: ""
 };
 
 // --- Elements --- //
-const stepSendCode = document.getElementById("step-send-code");
 const stepVerifyCode = document.getElementById("step-verify-code");
 const step2fa = document.getElementById("step-2fa");
-const authSection = document.getElementById("auth-section");
 const settingsSection = document.getElementById("settings-section");
 const listChannels = document.getElementById("list-channels");
 const inputWebhook = document.getElementById("input-webhook");
 const inputTgBotToken = document.getElementById("input-tg-bot-token");
 const inputTgChatId = document.getElementById("input-tg-chat-id");
 const inputMatchCooldown = document.getElementById("input-match-cooldown");
+const inputApiId = document.getElementById("input-api-id");
+const inputApiHash = document.getElementById("input-api-hash");
+const inputPhone = document.getElementById("input-phone");
+const accountBadge = document.getElementById("account-badge");
+const btnRequestCode = document.getElementById("btn-request-code");
 const instanceBar = document.getElementById("instance-bar");
 const instanceSelect = document.getElementById("instance-select");
 
-// --- Auth Flow --- //
+// --- Per-instance Auth Flow --- //
 
-function setStepDot(num, state) {
-    const dot = document.getElementById(`step-dot-${num}`);
-    if (!dot) return;
-    dot.classList.remove("active", "done");
-    if (state) dot.classList.add(state);
+function resetAuthSteps() {
+    phoneCodeHash = "";
+    stepVerifyCode.classList.add("hidden");
+    step2fa.classList.add("hidden");
+    document.getElementById("input-code").value = "";
+    document.getElementById("input-2fa").value = "";
 }
 
-document.getElementById("btn-request-code").addEventListener("click", async (e) => {
-    const btn = e.target;
+// Persist the credentials currently typed in, so auth uses the latest values.
+async function saveCurrentCredentials() {
+    currentSettings.api_id = inputApiId.value.trim();
+    currentSettings.api_hash = inputApiHash.value.trim();
+    currentSettings.phone = inputPhone.value.trim();
+    await persistSettings();
+}
+
+btnRequestCode.addEventListener("click", async () => {
+    if (currentInstanceId === null) return;
+    if (!inputApiId.value.trim() || !inputApiHash.value.trim() || !inputPhone.value.trim()) {
+        showToast("Enter API ID, API hash, and phone first.", "error");
+        return;
+    }
+    const btn = btnRequestCode;
     btn.disabled = true;
-    btn.innerText = "Requesting...";
+    btn.innerText = "Sending...";
     try {
-        const res = await fetch("/api/auth/send_code", { method: "POST" });
+        await saveCurrentCredentials();
+        const res = await fetch(`/api/instances/${currentInstanceId}/auth/send_code`, { method: "POST" });
         const data = await res.json();
         if (data.status === "success") {
             phoneCodeHash = data.phone_code_hash;
-            setStepDot(1, "done");
-            setStepDot(2, "active");
-            stepSendCode.classList.add("hidden");
             stepVerifyCode.classList.remove("hidden");
-            stepVerifyCode.classList.add("flex");
+            document.getElementById("input-code").focus();
+            showToast("Login code sent to Telegram.", "success");
         } else {
             showToast(data.message || "Failed to send code.", "error");
         }
@@ -81,20 +100,20 @@ document.getElementById("btn-request-code").addEventListener("click", async (e) 
         showToast("Network error. Check your connection.", "error");
     } finally {
         btn.disabled = false;
-        btn.innerText = "Request Login Code";
+        btn.innerText = "Save & Send Login Code";
     }
 });
 
 document.getElementById("btn-submit-code").addEventListener("click", async (e) => {
     const code = document.getElementById("input-code").value.trim();
-    if (!code) return;
+    if (!code || currentInstanceId === null) return;
 
     const btn = e.target;
     btn.disabled = true;
     btn.innerText = "Verifying...";
 
     try {
-        const res = await fetch("/api/auth/verify_code", {
+        const res = await fetch(`/api/instances/${currentInstanceId}/auth/verify_code`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ code: code, phone_code_hash: phoneCodeHash })
@@ -104,12 +123,9 @@ document.getElementById("btn-submit-code").addEventListener("click", async (e) =
         if (data.status === "success") {
             handleAuthSuccess();
         } else if (data.status === "2fa_required") {
-            setStepDot(2, "done");
-            setStepDot(3, "active");
-            stepVerifyCode.classList.remove("flex");
             stepVerifyCode.classList.add("hidden");
             step2fa.classList.remove("hidden");
-            step2fa.classList.add("flex");
+            document.getElementById("input-2fa").focus();
         } else {
             showToast(data.message || "Invalid code.", "error");
         }
@@ -117,20 +133,20 @@ document.getElementById("btn-submit-code").addEventListener("click", async (e) =
         showToast("Network error. Check your connection.", "error");
     } finally {
         btn.disabled = false;
-        btn.innerText = "Submit Code";
+        btn.innerText = "Verify";
     }
 });
 
 document.getElementById("btn-submit-2fa").addEventListener("click", async (e) => {
     const password = document.getElementById("input-2fa").value;
-    if (!password) return;
+    if (!password || currentInstanceId === null) return;
 
     const btn = e.target;
     btn.disabled = true;
     btn.innerText = "Unlocking...";
 
     try {
-        const res = await fetch("/api/auth/verify_2fa", {
+        const res = await fetch(`/api/instances/${currentInstanceId}/auth/verify_2fa`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ password: password })
@@ -151,12 +167,17 @@ document.getElementById("btn-submit-2fa").addEventListener("click", async (e) =>
 });
 
 function handleAuthSuccess() {
-    authSection.classList.add("hidden");
-    settingsSection.classList.remove("opacity-40", "pointer-events-none");
-    instanceBar.classList.remove("opacity-40", "pointer-events-none");
-    updateStatusIndicator(true);
-    showToast("Authorization successful.", "success");
+    resetAuthSteps();
+    setConnected(true);
+    showToast("Account connected.", "success");
 }
+
+document.getElementById("input-code").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") document.getElementById("btn-submit-code").click();
+});
+document.getElementById("input-2fa").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") document.getElementById("btn-submit-2fa").click();
+});
 
 // --- Settings Flow --- //
 
@@ -367,6 +388,36 @@ window.removeListItem = function (type, idx) {
     renderSettings();
 };
 
+// Gather the editable inputs into currentSettings, then POST to the instance.
+async function persistSettings() {
+    if (currentInstanceId === null) throw new Error("No instance selected.");
+    currentSettings.webhook_url = inputWebhook.value.trim();
+    currentSettings.tg_bot_token = inputTgBotToken.value.trim();
+    currentSettings.tg_chat_id = inputTgChatId.value.trim();
+    currentSettings.match_cooldown = Math.max(0, parseInt(inputMatchCooldown.value) || 0);
+    currentSettings.api_id = inputApiId.value.trim();
+    currentSettings.api_hash = inputApiHash.value.trim();
+    currentSettings.phone = inputPhone.value.trim();
+
+    const res = await fetch(`/api/instances/${currentInstanceId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            channels: currentSettings.channels,
+            keywords: currentSettings.keywords,
+            excluded_keywords: currentSettings.excluded_keywords,
+            webhook_url: currentSettings.webhook_url,
+            tg_bot_token: currentSettings.tg_bot_token,
+            tg_chat_id: currentSettings.tg_chat_id,
+            match_cooldown: currentSettings.match_cooldown,
+            api_id: currentSettings.api_id,
+            api_hash: currentSettings.api_hash,
+            phone: currentSettings.phone
+        })
+    });
+    if (!res.ok) throw new Error("Save failed.");
+}
+
 document.getElementById("btn-save-settings").addEventListener("click", async (e) => {
     const btn = e.target.closest("button");
     if (currentInstanceId === null) {
@@ -374,26 +425,9 @@ document.getElementById("btn-save-settings").addEventListener("click", async (e)
         return;
     }
     const originalContent = btn.innerHTML;
-    currentSettings.webhook_url = inputWebhook.value.trim();
-    currentSettings.tg_bot_token = inputTgBotToken.value.trim();
-    currentSettings.tg_chat_id = inputTgChatId.value.trim();
-    currentSettings.match_cooldown = Math.max(0, parseInt(inputMatchCooldown.value) || 0);
-
     btn.innerHTML = `<span class="flex items-center gap-2">Saving...</span>`;
     try {
-        await fetch(`/api/instances/${currentInstanceId}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                channels: currentSettings.channels,
-                keywords: currentSettings.keywords,
-                excluded_keywords: currentSettings.excluded_keywords,
-                webhook_url: currentSettings.webhook_url,
-                tg_bot_token: currentSettings.tg_bot_token,
-                tg_chat_id: currentSettings.tg_chat_id,
-                match_cooldown: currentSettings.match_cooldown
-            })
-        });
+        await persistSettings();
         btn.innerHTML = `<span class="flex items-center gap-2 text-green-400">Saved!</span>`;
         showToast("Settings saved.", "success");
         setTimeout(() => { btn.innerHTML = originalContent; }, 2000);
@@ -421,6 +455,10 @@ function applySettingsToInputs() {
     inputTgBotToken.value = currentSettings.tg_bot_token || "";
     inputTgChatId.value = currentSettings.tg_chat_id || "";
     inputMatchCooldown.value = currentSettings.match_cooldown ?? 60;
+    inputApiId.value = currentSettings.api_id || "";
+    inputApiHash.value = currentSettings.api_hash || "";
+    inputPhone.value = currentSettings.phone || "";
+    resetAuthSteps();
     renderSettings();
 }
 
@@ -448,7 +486,10 @@ async function loadInstanceSettings(id) {
         webhook_url: data.webhook_url || "",
         tg_bot_token: data.tg_bot_token || "",
         tg_chat_id: data.tg_chat_id || "",
-        match_cooldown: data.match_cooldown ?? 60
+        match_cooldown: data.match_cooldown ?? 60,
+        api_id: data.api_id || "",
+        api_hash: data.api_hash || "",
+        phone: data.phone || ""
     };
     applySettingsToInputs();
 }
@@ -457,6 +498,7 @@ async function selectInstance(id) {
     currentInstanceId = id;
     renderInstanceSelect();
     await loadInstanceSettings(id);
+    await refreshAuthStatus();
     // Reset events view then reload for this instance
     const list = document.getElementById("events-list");
     if (list) list.dataset.topId = "";
@@ -539,41 +581,52 @@ document.getElementById("btn-delete-instance").addEventListener("click", async (
 // Init
 loadInstances();
 
-// --- Status Polling --- //
-function updateStatusIndicator(authorized) {
+// --- Per-instance connection status --- //
+
+// Reflect the selected instance's account state in the header pill, the account
+// card badge, and the request-code button label.
+function setConnected(authorized) {
     const container = document.getElementById("auth-status");
     const ping = container.querySelector(".animate-ping");
     const dot = container.querySelectorAll("span span")[1];
     const text = document.getElementById("auth-text");
 
+    const green = ["bg-green-500/10", "text-green-400", "border-green-500/20"];
+    const amber = ["bg-amber-500/10", "text-amber-400", "border-amber-500/20"];
+
+    function swap(el, from, to) {
+        from.forEach((c, i) => { el.className = el.className.replace(c, to[i]); });
+    }
+
     if (authorized) {
-        container.className = container.className
-            .replace("bg-amber-500/10", "bg-green-500/10")
-            .replace("text-amber-400", "text-green-400")
-            .replace("border-amber-500/20", "border-green-500/20");
+        swap(container, amber, green);
         ping.className = ping.className.replace("bg-amber-400", "bg-green-400");
         dot.className = dot.className.replace("bg-amber-500", "bg-green-500");
-        text.textContent = "Active Session";
+        text.textContent = "Connected";
+        accountBadge.className = "text-[11px] font-medium px-2.5 py-1 rounded-full border text-green-400 border-green-500/20 bg-green-500/10";
+        accountBadge.textContent = "Connected";
+        btnRequestCode.innerText = "Reconnect";
     } else {
-        container.className = container.className
-            .replace("bg-green-500/10", "bg-amber-500/10")
-            .replace("text-green-400", "text-amber-400")
-            .replace("border-green-500/20", "border-amber-500/20");
+        swap(container, green, amber);
         ping.className = ping.className.replace("bg-green-400", "bg-amber-400");
         dot.className = dot.className.replace("bg-green-500", "bg-amber-500");
-        text.textContent = "Require Auth";
+        text.textContent = "Not connected";
+        accountBadge.className = "text-[11px] font-medium px-2.5 py-1 rounded-full border text-amber-400 border-amber-500/20 bg-amber-500/10";
+        accountBadge.textContent = "Not connected";
+        btnRequestCode.innerText = "Save & Send Login Code";
     }
 }
 
-async function pollStatus() {
+async function refreshAuthStatus() {
+    if (currentInstanceId === null) return;
     try {
-        const res = await fetch("/api/status");
+        const res = await fetch(`/api/instances/${currentInstanceId}/status`);
         const data = await res.json();
-        updateStatusIndicator(data.authorized);
+        setConnected(!!data.authorized);
     } catch (_) {}
 }
 
-setInterval(pollStatus, 30000);
+setInterval(refreshAuthStatus, 30000);
 
 // --- Activity Log --- //
 function timeAgo(isoString) {
