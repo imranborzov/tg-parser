@@ -5,16 +5,19 @@ A self-hosted Telegram channel monitor. Watch any number of channels for keyword
 Built with Python, FastAPI, and Telethon.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Python](https://img.shields.io/badge/python-3.10+-blue.svg)
+![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
 
 ---
 
 ## Features
 
-- **Keyword monitoring** — watch multiple Telegram channels for any set of keywords
+- **Multiple instances** — run several independent monitors from one dashboard, each with its own channels, keywords, destination, and activity log
+- **Per-instance Telegram accounts** — every instance logs into its own Telegram account (its own `api_id`/`api_hash`/`phone`), so you can monitor from different accounts side by side
+- **Whole-word keyword matching** — case-insensitive, Unicode-aware; `ремонт` matches `нужен ремонт` but not `авторемонт`. Multi-word phrases supported
+- **Excluded words** — suppress a match when an unwanted word is present (e.g. keyword `rent` + excluded `car` ignores "rent a car")
 - **Webhook delivery** — POST matching messages as JSON to any URL (n8n, Make, Zapier, your own server)
 - **Telegram bot forwarding** — send matches directly to a Telegram chat via a bot
-- **Activity log** — live feed of recent matches in the UI
+- **Activity log** — live, per-instance feed of recent matches in the UI
 - **Web UI** — configure everything from a browser, no code required
 - **Self-hosted** — your credentials never leave your server
 
@@ -22,9 +25,9 @@ Built with Python, FastAPI, and Telethon.
 
 ## Requirements
 
-- Python 3.10+
-- A Telegram account
-- Telegram API credentials (free — see setup below)
+- Python 3.9+
+- One or more Telegram accounts
+- Telegram API credentials for each account (free — see setup below)
 
 ---
 
@@ -37,23 +40,14 @@ Built with Python, FastAPI, and Telethon.
 3. Create an app — name and description can be anything
 4. Copy your **App api_id** and **App api_hash**
 
-### 2. Clone and configure
+You enter these credentials per instance in the web UI (step 3 below). Each instance can use a different account.
+
+### 2. Clone and run
 
 ```bash
 git clone https://github.com/your-username/tg-parser.git
 cd tg-parser
-cp .env.example .env
 ```
-
-Open `.env` and fill in your values:
-
-```env
-API_ID=your_api_id
-API_HASH=your_api_hash
-PHONE_NUMBER=+1234567890
-```
-
-### 3. Run
 
 **Linux / macOS:**
 ```bash
@@ -75,17 +69,23 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 Open **http://localhost:8000** in your browser.
 
+> **`.env` is optional.** If you create a `.env` (`cp .env.example .env`) with `API_ID`/`API_HASH`/`PHONE_NUMBER`, those values seed the credentials of the **first** instance for convenience. Otherwise, just enter credentials for each instance in the UI.
+
 ---
 
 ## Usage
 
-### 1. Authenticate
+### 1. Pick or create an instance
 
-On first launch, click **Request Login Code**. Enter the code sent to your Telegram app. If you have 2FA enabled, enter your cloud password when prompted.
+The **Instance** bar at the top switches between monitors. Use **+ New** to create one, **Rename** to label it (e.g. "rent", "jobs"), and **Delete** to remove it. Each instance is fully isolated.
 
-Your session is saved locally and reused on subsequent startups — you only need to do this once.
+### 2. Connect the instance's Telegram account
 
-### 2. Configure
+In the **Telegram Account** card, enter that instance's **API ID**, **API Hash**, and **Phone Number**, then click **Save & Send Login Code**. Enter the code Telegram sends to that account. If the account has two-step verification, enter its cloud password.
+
+Each instance's session is saved locally (`session_<id>.session`) and reused on later startups — you only authenticate once per account.
+
+### 3. Configure monitoring
 
 | Field | Description |
 |---|---|
@@ -93,17 +93,21 @@ Your session is saved locally and reused on subsequent startups — you only nee
 | **Telegram Bot Token** | From [@BotFather](https://t.me/BotFather) — optional |
 | **Telegram Chat ID** | Where the bot should forward matches |
 | **Target Channels** | Channel usernames (without `@`) or numeric IDs |
-| **Keywords** | Words to watch for — case-insensitive |
+| **Keywords** | Whole words/phrases to watch for — case-insensitive |
+| **Excluded Words** | If any appears in a message, the match is suppressed |
+| **Match Cooldown** | Seconds to ignore the same keyword+channel after a hit (0 = off) |
 
 Click **Save Settings** when done.
 
-### 3. Getting a channel ID
+### 4. Getting a channel ID
 
 For public channels, the username works (e.g. `durov`).
 
 For private channels or groups, forward any message from the chat to [@userinfobot](https://t.me/userinfobot) — it will reply with the numeric ID.
 
-### 4. Webhook payload
+The account for that instance must be a **member** of any channel it monitors.
+
+### 5. Webhook payload
 
 When a keyword is matched, a POST request is sent with this JSON body:
 
@@ -122,18 +126,28 @@ When a keyword is matched, a POST request is sent with this JSON body:
 
 ---
 
+## Configuration
+
+| Environment variable | Description |
+|---|---|
+| `API_ID`, `API_HASH`, `PHONE_NUMBER` | Optional. Seed the first instance's credentials on first run. |
+| `TG_DATA_DIR` | Optional. Directory for the settings database and session files. Defaults to `src/database`. |
+
+---
+
 ## Project Structure
 
 ```
 tg-parser/
-├── main.py                  # FastAPI app, routes
+├── main.py                  # FastAPI app, routes (instances, auth, settings)
 ├── requirements.txt
 ├── start.sh / start.bat     # Quick-start scripts
-├── .env.example             # Copy to .env and fill in your credentials
+├── .env.example             # Optional — seeds the first instance's credentials
 └── src/
-    ├── config.py            # Loads .env variables
-    ├── database_manager.py  # SQLite via aiosqlite
-    ├── telegram_client.py   # Telethon client, message handler
+    ├── config.py            # Env loading, data-dir resolution
+    ├── database_manager.py  # SQLite via aiosqlite (instances, events)
+    ├── telegram_client.py   # One Telethon client per instance, matching logic
+    ├── database/            # settings.sqlite + session_<id>.session files
     ├── static/
     │   ├── app.js
     │   └── index.css

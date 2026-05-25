@@ -12,7 +12,10 @@ API_HASH = os.getenv("API_HASH")
 PHONE_NUMBER = os.getenv("PHONE_NUMBER")
 
 if not API_ID or not API_HASH or not PHONE_NUMBER:
-    logger.warning("API_ID, API_HASH, or PHONE_NUMBER not set in .env")
+    logger.info(
+        "No API_ID/API_HASH/PHONE_NUMBER in .env — set credentials per instance "
+        "in the web UI."
+    )
 
 # Data directory — holds the settings DB and per-instance session files.
 # Defaults next to this file; override with TG_DATA_DIR (handy for tests or
