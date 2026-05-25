@@ -25,6 +25,8 @@ function showToast(message, type = "info") {
 
 // --- State --- //
 let phoneCodeHash = "";
+let currentInstanceId = null;
+let instances = [];
 let currentSettings = {
     channels: [],
     keywords: [],
@@ -45,6 +47,8 @@ const inputWebhook = document.getElementById("input-webhook");
 const inputTgBotToken = document.getElementById("input-tg-bot-token");
 const inputTgChatId = document.getElementById("input-tg-chat-id");
 const inputMatchCooldown = document.getElementById("input-match-cooldown");
+const instanceBar = document.getElementById("instance-bar");
+const instanceSelect = document.getElementById("instance-select");
 
 // --- Auth Flow --- //
 
@@ -148,6 +152,7 @@ document.getElementById("btn-submit-2fa").addEventListener("click", async (e) =>
 function handleAuthSuccess() {
     authSection.classList.add("hidden");
     settingsSection.classList.remove("opacity-40", "pointer-events-none");
+    instanceBar.classList.remove("opacity-40", "pointer-events-none");
     updateStatusIndicator(true);
     showToast("Authorization successful.", "success");
 }
@@ -314,6 +319,10 @@ window.removeListItem = function (type, idx) {
 
 document.getElementById("btn-save-settings").addEventListener("click", async (e) => {
     const btn = e.target.closest("button");
+    if (currentInstanceId === null) {
+        showToast("No instance selected.", "error");
+        return;
+    }
     const originalContent = btn.innerHTML;
     currentSettings.webhook_url = inputWebhook.value.trim();
     currentSettings.tg_bot_token = inputTgBotToken.value.trim();
@@ -322,10 +331,17 @@ document.getElementById("btn-save-settings").addEventListener("click", async (e)
 
     btn.innerHTML = `<span class="flex items-center gap-2">Saving...</span>`;
     try {
-        await fetch("/api/settings", {
+        await fetch(`/api/instances/${currentInstanceId}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(currentSettings)
+            body: JSON.stringify({
+                channels: currentSettings.channels,
+                keywords: currentSettings.keywords,
+                webhook_url: currentSettings.webhook_url,
+                tg_bot_token: currentSettings.tg_bot_token,
+                tg_chat_id: currentSettings.tg_chat_id,
+                match_cooldown: currentSettings.match_cooldown
+            })
         });
         btn.innerHTML = `<span class="flex items-center gap-2 text-green-400">Saved!</span>`;
         showToast("Settings saved.", "success");
@@ -341,16 +357,129 @@ document.getElementById("input-new-channel").addEventListener("keydown", (e) => 
     if (e.key === "Enter") addListItem("channels");
 });
 
-// Init
-try {
-    const dataEl = document.getElementById("initial-data");
-    if (dataEl && dataEl.textContent) {
-        currentSettings = JSON.parse(dataEl.textContent);
-        renderSettings();
-    }
-} catch (err) {
-    console.error("Failed to parse initial settings", err);
+// --- Instances --- //
+
+function applySettingsToInputs() {
+    inputWebhook.value = currentSettings.webhook_url || "";
+    inputTgBotToken.value = currentSettings.tg_bot_token || "";
+    inputTgChatId.value = currentSettings.tg_chat_id || "";
+    inputMatchCooldown.value = currentSettings.match_cooldown ?? 60;
+    renderSettings();
 }
+
+function renderInstanceSelect() {
+    instanceSelect.innerHTML = "";
+    instances.forEach(inst => {
+        const opt = document.createElement("option");
+        opt.value = inst.id;
+        opt.textContent = inst.name;
+        if (inst.id === currentInstanceId) opt.selected = true;
+        instanceSelect.appendChild(opt);
+    });
+    // Disable delete when only one instance remains
+    document.getElementById("btn-delete-instance").disabled = instances.length <= 1;
+}
+
+async function loadInstanceSettings(id) {
+    const res = await fetch(`/api/instances/${id}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    currentSettings = {
+        channels: data.channels || [],
+        keywords: data.keywords || [],
+        webhook_url: data.webhook_url || "",
+        tg_bot_token: data.tg_bot_token || "",
+        tg_chat_id: data.tg_chat_id || "",
+        match_cooldown: data.match_cooldown ?? 60
+    };
+    applySettingsToInputs();
+}
+
+async function selectInstance(id) {
+    currentInstanceId = id;
+    renderInstanceSelect();
+    await loadInstanceSettings(id);
+    // Reset events view then reload for this instance
+    const list = document.getElementById("events-list");
+    if (list) list.dataset.topId = "";
+    await loadEvents();
+}
+
+async function loadInstances(preferredId = null) {
+    try {
+        const res = await fetch("/api/instances");
+        instances = await res.json();
+        if (!instances.length) return;
+        let target = preferredId;
+        if (target === null || !instances.some(i => i.id === target)) {
+            target = instances[0].id;
+        }
+        await selectInstance(target);
+    } catch (err) {
+        console.error("Failed to load instances", err);
+    }
+}
+
+instanceSelect.addEventListener("change", (e) => {
+    selectInstance(parseInt(e.target.value));
+});
+
+document.getElementById("btn-new-instance").addEventListener("click", async () => {
+    const name = prompt("Name for the new instance:", "New instance");
+    if (name === null) return;
+    try {
+        const res = await fetch("/api/instances", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: name.trim() || "Untitled" })
+        });
+        const created = await res.json();
+        await loadInstances(created.id);
+        showToast("Instance created.", "success");
+    } catch (_) {
+        showToast("Failed to create instance.", "error");
+    }
+});
+
+document.getElementById("btn-rename-instance").addEventListener("click", async () => {
+    if (currentInstanceId === null) return;
+    const current = instances.find(i => i.id === currentInstanceId);
+    const name = prompt("Rename instance:", current ? current.name : "");
+    if (name === null) return;
+    try {
+        await fetch(`/api/instances/${currentInstanceId}/rename`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: name.trim() || "Untitled" })
+        });
+        await loadInstances(currentInstanceId);
+        showToast("Instance renamed.", "success");
+    } catch (_) {
+        showToast("Failed to rename instance.", "error");
+    }
+});
+
+document.getElementById("btn-delete-instance").addEventListener("click", async () => {
+    if (currentInstanceId === null || instances.length <= 1) return;
+    const current = instances.find(i => i.id === currentInstanceId);
+    if (!confirm(`Delete instance "${current ? current.name : ""}"? Its settings and activity log will be removed.`)) return;
+    try {
+        const res = await fetch(`/api/instances/${currentInstanceId}`, { method: "DELETE" });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            showToast(err.detail || "Failed to delete instance.", "error");
+            return;
+        }
+        currentInstanceId = null;
+        await loadInstances();
+        showToast("Instance deleted.", "success");
+    } catch (_) {
+        showToast("Failed to delete instance.", "error");
+    }
+});
+
+// Init
+loadInstances();
 
 // --- Status Polling --- //
 function updateStatusIndicator(authorized) {
@@ -398,8 +527,9 @@ function timeAgo(isoString) {
 }
 
 async function loadEvents() {
+    if (currentInstanceId === null) return;
     try {
-        const res = await fetch("/api/events");
+        const res = await fetch(`/api/instances/${currentInstanceId}/events`);
         const events = await res.json();
         const list = document.getElementById("events-list");
         const empty = document.getElementById("events-empty");
@@ -477,10 +607,14 @@ setInterval(loadEvents, 15000);
 document.getElementById("btn-test-webhook").addEventListener("click", async (e) => {
     const btn = e.target;
     const original = btn.textContent;
+    if (currentInstanceId === null) {
+        showToast("No instance selected.", "error");
+        return;
+    }
     btn.disabled = true;
     btn.textContent = "...";
     try {
-        const res = await fetch("/api/webhook/test", { method: "POST" });
+        const res = await fetch(`/api/instances/${currentInstanceId}/webhook/test`, { method: "POST" });
         const data = await res.json();
         if (data.status === "success") {
             showToast("Test payload sent to webhook.", "success");

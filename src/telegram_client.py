@@ -8,7 +8,7 @@ import httpx
 from typing import Optional
 from telethon import TelegramClient, events, errors
 from src.config import API_ID, API_HASH, PHONE_NUMBER
-from src.database_manager import get_settings, insert_event
+from src.database_manager import get_all_instances_full, insert_event
 
 logger = logging.getLogger(__name__)
 
@@ -109,46 +109,49 @@ async def is_authorized():
         await c.connect()
     return await c.is_user_authorized()
 
+def _channel_in_list(channels, chat_id: str, chat_username: str) -> bool:
+    """True if this chat matches any entry in an instance's channel list."""
+    for c in channels:
+        c_str = str(c).strip().lstrip("@")
+        if not c_str:
+            continue
+        if c_str == chat_id or (chat_username and c_str.lower() == chat_username.lower()):
+            return True
+    return False
+
+
 async def process_new_message(event):
-    settings = await get_settings()
-    channels = settings.get("channels", [])
-    keywords = settings.get("keywords", [])
-    webhook_url = settings.get("webhook_url", "")
-    tg_bot_token = settings.get("tg_bot_token", "")
-    tg_chat_id = settings.get("tg_chat_id", "")
+    """Route a single incoming message through every configured instance.
 
-    match_cooldown = settings.get("match_cooldown", MATCH_COOLDOWN)
-
-    if not channels or not keywords or (not webhook_url and not (tg_bot_token and tg_chat_id)):
+    There is one Telegram connection (one account), so each message is offered
+    to every instance independently: an instance only acts on it if the channel
+    is in *its* list and the text matches *its* keywords. Cooldowns and the
+    activity log are tracked per instance, so instances stay fully isolated.
+    """
+    instances = await get_all_instances_full()
+    if not instances:
         return
 
     chat = await event.get_chat()
     chat_id = str(event.chat_id)
     chat_username = getattr(chat, 'username', '') or ''
 
-    # Check if this is a channel we actually monitor (early exit before any rate logic)
-    channel_matched = False
-    for c in channels:
-        c_str = str(c).strip().lstrip("@")
-        if not c_str:
-            continue
-        if c_str == chat_id or (chat_username and c_str.lower() == chat_username.lower()):
-            channel_matched = True
-            break
-
-    if not channel_matched:
+    # Is this channel monitored by *any* instance? (early exit before rate logic)
+    relevant = [
+        inst for inst in instances
+        if _channel_in_list(inst.get("channels", []), chat_id, chat_username)
+    ]
+    if not relevant:
         return
 
     now = time.monotonic()
 
-    # --- Flood guard ---
-    # If the channel is currently paused, drop the message silently.
+    # --- Flood guard (per channel, shared across instances) ---
     flood_until = _channel_flood_until.get(chat_id, 0)
     if now < flood_until:
         logger.debug("Flood guard active for %s — dropping message.", chat_id)
         return
 
-    # Record this message and count recent ones.
     times = _channel_message_times[chat_id]
     times.append(now)
     recent = sum(1 for t in times if now - t < FLOOD_WINDOW)
@@ -161,60 +164,75 @@ async def process_new_message(event):
         )
         return
 
-    # --- Keyword matching ---
     message_text = event.message.message or ""
-    matched_keyword = next((kw for kw in keywords if kw.lower() in message_text.lower()), None)
 
+    # Build the message link once — it's the same for every instance.
+    if chat_id.startswith("-100"):
+        message_link = f"https://t.me/c/{chat_id[4:]}/{event.message.id}"
+    elif getattr(chat, 'username', None):
+        message_link = f"https://t.me/{chat.username}/{event.message.id}"
+    else:
+        message_link = "No link available"
+
+    channel_name = getattr(chat, 'title', None) or getattr(chat, 'username', 'Unknown')
+
+    for inst in relevant:
+        await _dispatch_for_instance(
+            inst, now, chat_id, channel_name, message_text, message_link, event
+        )
+
+
+async def _dispatch_for_instance(inst, now, chat_id, channel_name, message_text, message_link, event):
+    keywords = inst.get("keywords", [])
+    webhook_url = inst.get("webhook_url", "")
+    tg_bot_token = inst.get("tg_bot_token", "")
+    tg_chat_id = inst.get("tg_chat_id", "")
+    match_cooldown = inst.get("match_cooldown", MATCH_COOLDOWN)
+    instance_id = inst["id"]
+
+    if not keywords or (not webhook_url and not (tg_bot_token and tg_chat_id)):
+        return
+
+    matched_keyword = next((kw for kw in keywords if kw.lower() in message_text.lower()), None)
     if not matched_keyword:
         return
 
-    # --- Match cooldown ---
-    # Avoid notification bursts for the same keyword in the same channel.
-    cooldown_key = f"{chat_id}:{matched_keyword.lower()}"
+    # --- Match cooldown (per instance + channel + keyword) ---
+    cooldown_key = f"{instance_id}:{chat_id}:{matched_keyword.lower()}"
     if match_cooldown > 0:
         if now < _match_cooldowns.get(cooldown_key, 0):
-            logger.debug("Match cooldown active for '%s' in %s — skipping.", matched_keyword, chat_id)
+            logger.debug("Match cooldown active for '%s' in %s (instance %s) — skipping.",
+                         matched_keyword, chat_id, instance_id)
             return
         _match_cooldowns[cooldown_key] = now + match_cooldown
 
-    if matched_keyword:
-        # Construct the message link depending on if it's a private/public group
-        if chat_id.startswith("-100"):
-            message_link = f"https://t.me/c/{chat_id[4:]}/{event.message.id}"
-        elif getattr(chat, 'username', None):
-            message_link = f"https://t.me/{chat.username}/{event.message.id}"
-        else:
-            message_link = "No link available"
+    payload = {
+        "channel_id": chat_id,
+        "channel_name": channel_name,
+        "message_id": event.message.id,
+        "message_text": message_text,
+        "message_link": message_link,
+        "matched_keyword": matched_keyword,
+        "date": event.message.date.isoformat(),
+        "sender_id": str(event.message.sender_id) if event.message.sender_id else None,
+    }
 
-        payload = {
-            "channel_id": chat_id,
-            "channel_name": getattr(chat, 'title', None) or getattr(chat, 'username', 'Unknown'),
-            "message_id": event.message.id,
-            "message_text": message_text,
-            "message_link": message_link,
-            "matched_keyword": matched_keyword,
-            "date": event.message.date.isoformat(),
-            "sender_id": str(event.message.sender_id) if event.message.sender_id else None
-        }
-        
-        
-        # Persist to activity log
-        asyncio.create_task(insert_event(
-            channel_id=chat_id,
-            channel_name=payload["channel_name"],
-            keyword=matched_keyword,
-            message_text=message_text[:500],
-            message_link=message_link,
-            matched_at=payload["date"],
-        ))
+    # Persist to this instance's activity log
+    asyncio.create_task(insert_event(
+        instance_id=instance_id,
+        channel_id=chat_id,
+        channel_name=channel_name,
+        keyword=matched_keyword,
+        message_text=message_text[:500],
+        message_link=message_link,
+        matched_at=payload["date"],
+    ))
 
-        # Send to webhook in background if url exists
-        if webhook_url:
-            asyncio.create_task(send_to_webhook(webhook_url, payload))
+    if webhook_url:
+        asyncio.create_task(send_to_webhook(webhook_url, payload))
 
-        # Send to TG bot if configured
-        if tg_bot_token and tg_chat_id:
-            asyncio.create_task(send_to_tg_bot(tg_bot_token, tg_chat_id, payload))
+    if tg_bot_token and tg_chat_id:
+        asyncio.create_task(send_to_tg_bot(tg_bot_token, tg_chat_id, payload))
 
 async def send_to_webhook(url: str, payload: dict):
     try:

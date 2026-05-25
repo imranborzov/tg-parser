@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from fastapi import FastAPI, Request, Form
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -16,7 +16,16 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-from src.database_manager import init_db, get_settings, update_settings, get_events
+from src.database_manager import (
+    init_db,
+    list_instances,
+    get_instance,
+    create_instance,
+    update_instance,
+    delete_instance,
+    count_instances,
+    get_events,
+)
 from src.telegram_client import (
     start_client_bg,
     send_code,
@@ -55,6 +64,12 @@ class SetupData(BaseModel):
     tg_chat_id: str = ""
     match_cooldown: int = 60
 
+class InstanceCreate(BaseModel):
+    name: str = "Untitled"
+
+class InstanceRename(BaseModel):
+    name: str
+
 class AuthData(BaseModel):
     code: str
     phone_code_hash: str
@@ -66,15 +81,15 @@ class TwoFAData(BaseModel):
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
     authorized = await is_authorized()
-    settings = await get_settings()
     return templates.TemplateResponse(
-        "index.html", 
+        "index.html",
         {
-            "request": request, 
+            "request": request,
             "authorized": authorized,
-            "settings": settings
         }
     )
+
+# --- Auth (global — one Telegram account) ---
 
 @app.post("/api/auth/send_code")
 async def api_send_code():
@@ -94,23 +109,69 @@ async def api_verify_2fa(data: TwoFAData):
     result = await verify_2fa(data.password)
     return result
 
-@app.get("/api/events")
-async def api_events():
-    return await get_events()
-
 @app.get("/api/status")
 async def api_status():
     authorized = await is_authorized()
     return {"authorized": authorized}
 
-@app.get("/api/settings")
-async def api_get_settings():
-    return await get_settings()
+# --- Instances ---
 
-@app.post("/api/webhook/test")
-async def api_test_webhook():
-    settings = await get_settings()
-    webhook_url = settings.get("webhook_url", "")
+@app.get("/api/instances")
+async def api_list_instances():
+    return await list_instances()
+
+@app.post("/api/instances")
+async def api_create_instance(data: InstanceCreate):
+    return await create_instance(data.name)
+
+@app.get("/api/instances/{instance_id}")
+async def api_get_instance(instance_id: int):
+    inst = await get_instance(instance_id)
+    if inst is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    return inst
+
+@app.post("/api/instances/{instance_id}")
+async def api_update_instance(instance_id: int, data: SetupData):
+    if await get_instance(instance_id) is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    await update_instance(
+        instance_id,
+        channels=data.channels,
+        keywords=data.keywords,
+        webhook_url=data.webhook_url,
+        tg_bot_token=data.tg_bot_token,
+        tg_chat_id=data.tg_chat_id,
+        match_cooldown=data.match_cooldown,
+    )
+    return {"status": "success"}
+
+@app.post("/api/instances/{instance_id}/rename")
+async def api_rename_instance(instance_id: int, data: InstanceRename):
+    if await get_instance(instance_id) is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    await update_instance(instance_id, name=data.name)
+    return {"status": "success"}
+
+@app.delete("/api/instances/{instance_id}")
+async def api_delete_instance(instance_id: int):
+    if await get_instance(instance_id) is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    if await count_instances() <= 1:
+        raise HTTPException(status_code=400, detail="Cannot delete the last instance.")
+    await delete_instance(instance_id)
+    return {"status": "success"}
+
+@app.get("/api/instances/{instance_id}/events")
+async def api_instance_events(instance_id: int):
+    return await get_events(instance_id)
+
+@app.post("/api/instances/{instance_id}/webhook/test")
+async def api_test_webhook(instance_id: int):
+    inst = await get_instance(instance_id)
+    if inst is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    webhook_url = inst.get("webhook_url", "")
     if not webhook_url:
         return {"status": "error", "message": "No webhook URL configured."}
     sample = {
@@ -124,11 +185,6 @@ async def api_test_webhook():
         "sender_id": None,
     }
     await send_to_webhook(webhook_url, sample)
-    return {"status": "success"}
-
-@app.post("/api/settings")
-async def api_update_settings(data: SetupData):
-    await update_settings(data.channels, data.keywords, data.webhook_url, data.tg_bot_token, data.tg_chat_id, data.match_cooldown)
     return {"status": "success"}
 
 if __name__ == "__main__":

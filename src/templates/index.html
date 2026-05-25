@@ -82,6 +82,28 @@
 
         <main class="space-y-4">
 
+            <!-- Instance Switcher -->
+            <section id="instance-bar"
+                class="bg-dark-card border border-dark-border rounded-xl px-4 py-3
+                {% if not authorized %}opacity-40 pointer-events-none{% endif %}">
+                <div class="flex items-center gap-2">
+                    <span class="text-[11px] font-semibold text-gray-500 uppercase tracking-wider shrink-0">Instance</span>
+                    <select id="instance-select"
+                        class="flex-1 bg-dark-bg border border-dark-border rounded-lg px-3 py-2 text-sm text-white
+                               focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/20 transition-all">
+                    </select>
+                    <button id="btn-new-instance" class="btn-ghost px-3 whitespace-nowrap" title="Create a new instance">+ New</button>
+                    <button id="btn-rename-instance" class="btn-ghost px-3 whitespace-nowrap" title="Rename this instance">Rename</button>
+                    <button id="btn-delete-instance"
+                        class="border border-red-500/30 hover:border-red-500/60 text-red-400 hover:text-red-300
+                               text-sm font-medium py-2.5 px-3 rounded-lg transition-colors whitespace-nowrap"
+                        title="Delete this instance">Delete</button>
+                </div>
+                <p class="text-[11px] text-gray-600 mt-2">
+                    Each instance has its own channels, keywords, destination, and activity log — all on one Telegram account.
+                </p>
+            </section>
+
             <!-- Auth Card -->
             <section id="auth-section"
                 class="bg-dark-card border border-dark-border rounded-xl p-6
@@ -158,8 +180,7 @@
                         </div>
                         <div class="flex gap-2">
                             <input type="url" id="input-webhook" class="input-field"
-                                placeholder="https://n8n.example.com/webhook/..."
-                                value="{{ settings.webhook_url }}">
+                                placeholder="https://n8n.example.com/webhook/...">
                             <button id="btn-test-webhook" class="btn-ghost whitespace-nowrap">Test</button>
                         </div>
                     </div>
@@ -178,8 +199,7 @@
                                 <p>4. Copy the token BotFather gives you — looks like <span class="text-gray-200">1234567890:AAH...</span></p>
                             </div>
                             <input type="text" id="input-tg-bot-token" class="input-field"
-                                placeholder="1234567890:AAH..."
-                                value="{{ settings.tg_bot_token }}">
+                                placeholder="1234567890:AAH...">
                         </div>
                         <div>
                             <div class="flex items-center gap-1.5 mb-1.5">
@@ -193,8 +213,7 @@
                                 <p>Group IDs start with <span class="text-gray-200">-100...</span></p>
                             </div>
                             <input type="text" id="input-tg-chat-id" class="input-field"
-                                placeholder="-100123456789"
-                                value="{{ settings.tg_chat_id }}">
+                                placeholder="-100123456789">
                         </div>
                     </div>
                 </div>
@@ -247,7 +266,7 @@
                 <div class="flex items-center gap-3 mt-5">
                     <label class="text-xs text-gray-400 whitespace-nowrap">Match Cooldown</label>
                     <input type="number" id="input-match-cooldown" class="input-field w-24" min="0"
-                        placeholder="60" value="{{ settings.match_cooldown }}">
+                        placeholder="60">
                     <span class="text-xs text-gray-500">seconds &nbsp;&middot;&nbsp; set to <span class="text-gray-300">0</span> to disable</span>
                 </div>
 
@@ -273,10 +292,6 @@
         </main>
     </div>
 
-    <!-- Inject initial data -->
-    <script type="application/json" id="initial-data">
-        {"channels":{{settings.channels|tojson|safe}},"keywords":{{settings.keywords|tojson|safe}},"webhook_url":"{{settings.webhook_url}}","tg_bot_token":"{{settings.tg_bot_token}}","tg_chat_id":"{{settings.tg_chat_id}}","match_cooldown":{{settings.match_cooldown}}}
-    </script>
     <!-- Keywords Modal -->
     <div id="keywords-modal" class="hidden fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4">
         <div id="keywords-backdrop" class="absolute inset-0 bg-black/70 backdrop-blur-sm"></div>
@@ -321,7 +336,7 @@
     </div>
 
     <div id="toast-container"></div>
-    <script src="/static/app.js?v=8"></script>
+    <script src="/static/app.js?v=9"></script>
 
 </body>
 
