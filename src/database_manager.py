@@ -23,9 +23,16 @@ async def init_db():
                 tg_bot_token TEXT DEFAULT '',
                 tg_chat_id TEXT DEFAULT '',
                 match_cooldown INTEGER DEFAULT 60,
+                excluded_keywords TEXT DEFAULT '[]',
                 created_at TEXT
             )
         ''')
+
+        # Add columns introduced after the initial instances schema (idempotent)
+        try:
+            await conn.execute("ALTER TABLE instances ADD COLUMN excluded_keywords TEXT DEFAULT '[]'")
+        except aiosqlite.OperationalError:
+            pass  # Column already exists
 
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS events (
@@ -122,6 +129,7 @@ def _instance_row_to_dict(row) -> dict:
         "tg_bot_token": row[5] or "",
         "tg_chat_id": row[6] or "",
         "match_cooldown": row[7] if row[7] is not None else 60,
+        "excluded_keywords": json.loads(row[8]) if len(row) > 8 and row[8] else [],
     }
 
 
@@ -139,7 +147,7 @@ async def get_instance(instance_id: int):
     async with aiosqlite.connect(DB_PATH) as conn:
         async with conn.execute(
             'SELECT id, name, channels, keywords, webhook_url, tg_bot_token, '
-            'tg_chat_id, match_cooldown FROM instances WHERE id = ?',
+            'tg_chat_id, match_cooldown, excluded_keywords FROM instances WHERE id = ?',
             (instance_id,),
         ) as cursor:
             row = await cursor.fetchone()
@@ -151,7 +159,7 @@ async def get_all_instances_full() -> list:
     async with aiosqlite.connect(DB_PATH) as conn:
         async with conn.execute(
             'SELECT id, name, channels, keywords, webhook_url, tg_bot_token, '
-            'tg_chat_id, match_cooldown FROM instances ORDER BY id ASC'
+            'tg_chat_id, match_cooldown, excluded_keywords FROM instances ORDER BY id ASC'
         ) as cursor:
             rows = await cursor.fetchall()
     return [_instance_row_to_dict(r) for r in rows]
@@ -171,7 +179,7 @@ async def create_instance(name: str) -> dict:
 
 async def update_instance(instance_id: int, *, name=None, channels=None, keywords=None,
                           webhook_url=None, tg_bot_token=None, tg_chat_id=None,
-                          match_cooldown=None):
+                          match_cooldown=None, excluded_keywords=None):
     """Update only the provided fields of an instance."""
     fields = []
     values = []
@@ -189,6 +197,8 @@ async def update_instance(instance_id: int, *, name=None, channels=None, keyword
         fields.append('tg_chat_id = ?'); values.append(tg_chat_id)
     if match_cooldown is not None:
         fields.append('match_cooldown = ?'); values.append(match_cooldown)
+    if excluded_keywords is not None:
+        fields.append('excluded_keywords = ?'); values.append(json.dumps(excluded_keywords))
 
     if not fields:
         return

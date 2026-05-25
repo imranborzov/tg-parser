@@ -63,6 +63,7 @@ class SetupData(BaseModel):
     tg_bot_token: str = ""
     tg_chat_id: str = ""
     match_cooldown: int = 60
+    excluded_keywords: list[str] = []
 
 class InstanceCreate(BaseModel):
     name: str = "Untitled"
@@ -143,6 +144,7 @@ async def api_update_instance(instance_id: int, data: SetupData):
         tg_bot_token=data.tg_bot_token,
         tg_chat_id=data.tg_chat_id,
         match_cooldown=data.match_cooldown,
+        excluded_keywords=data.excluded_keywords,
     )
     return {"status": "success"}
 
