@@ -90,6 +90,7 @@
                     </select>
                     <button id="btn-new-instance" class="btn-ghost px-3 whitespace-nowrap" title="Create a new instance">+ New</button>
                     <button id="btn-rename-instance" class="btn-ghost px-3 whitespace-nowrap" title="Rename this instance">Rename</button>
+                    <button id="btn-pause-instance" class="btn-ghost px-3 whitespace-nowrap" title="Pause or resume monitoring" disabled>Pause</button>
                     <button id="btn-delete-instance"
                         class="border border-red-500/30 hover:border-red-500/60 text-red-400 hover:text-red-300
                                text-sm font-medium py-2.5 px-3 rounded-lg transition-colors whitespace-nowrap"
@@ -225,6 +226,10 @@
                     </div>
                 </div>
 
+                <button id="btn-save-settings" class="btn-primary w-full mt-4">
+                    Save Settings
+                </button>
+
                 <hr class="border-dark-border my-6">
 
                 <!-- Monitoring subsection -->
@@ -298,10 +303,6 @@
                     <span class="text-xs text-gray-500">seconds &nbsp;&middot;&nbsp; set to <span class="text-gray-300">0</span> to disable</span>
                 </div>
 
-                <button id="btn-save-settings" class="btn-primary w-full mt-4">
-                    Save Settings
-                </button>
-
             </section>
 
             <!-- Activity Log -->
@@ -364,7 +365,7 @@
     </div>
 
     <div id="toast-container"></div>
-    <script src="/static/app.js?v=11"></script>
+    <script src="/static/app.js?v=13"></script>
 
 </body>
 

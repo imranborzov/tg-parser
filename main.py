@@ -36,6 +36,9 @@ from src.telegram_client import (
     verify_2fa,
     is_authorized,
     send_to_webhook,
+    pause_instance,
+    resume_instance,
+    is_instance_paused,
 )
 from typing import Optional
 
@@ -165,7 +168,21 @@ async def api_instance_status(instance_id: int):
                            and (inst.get("api_hash") or "").strip()
                            and (inst.get("phone") or "").strip())
     authorized = await is_authorized(instance_id) if has_credentials else False
-    return {"authorized": authorized, "has_credentials": has_credentials}
+    return {"authorized": authorized, "has_credentials": has_credentials, "paused": is_instance_paused(instance_id)}
+
+@app.post("/api/instances/{instance_id}/pause")
+async def api_pause_instance(instance_id: int):
+    if await get_instance(instance_id) is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    pause_instance(instance_id)
+    return {"status": "success", "paused": True}
+
+@app.post("/api/instances/{instance_id}/resume")
+async def api_resume_instance(instance_id: int):
+    if await get_instance(instance_id) is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    resume_instance(instance_id)
+    return {"status": "success", "paused": False}
 
 @app.post("/api/instances/{instance_id}/auth/send_code")
 async def api_send_code(instance_id: int):

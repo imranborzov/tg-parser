@@ -26,6 +26,7 @@ function showToast(message, type = "info") {
 // --- State --- //
 let phoneCodeHash = "";
 let currentInstanceId = null;
+let isPaused = false;
 let instances = [];
 let currentSettings = {
     channels: [],
@@ -54,6 +55,7 @@ const inputApiHash = document.getElementById("input-api-hash");
 const inputPhone = document.getElementById("input-phone");
 const accountBadge = document.getElementById("account-badge");
 const btnRequestCode = document.getElementById("btn-request-code");
+const btnPauseInstance = document.getElementById("btn-pause-instance");
 const instanceBar = document.getElementById("instance-bar");
 const instanceSelect = document.getElementById("instance-select");
 
@@ -168,7 +170,7 @@ document.getElementById("btn-submit-2fa").addEventListener("click", async (e) =>
 
 function handleAuthSuccess() {
     resetAuthSteps();
-    setConnected(true);
+    refreshAuthStatus();
     showToast("Account connected.", "success");
 }
 
@@ -257,7 +259,10 @@ function addExcluded() {
     });
     input.value = "";
     renderSettings();
-    if (added > 0) showToast(`Added ${added} excluded word${added > 1 ? "s" : ""}.`, "success");
+    if (added > 0) {
+        showToast(`Added ${added} excluded word${added > 1 ? "s" : ""}.`, "success");
+        autoSave();
+    }
 }
 
 function renderKeywordsPreview() {
@@ -330,6 +335,7 @@ window.addListItem = function (type) {
         currentSettings[type].push(val);
         input.value = "";
         renderSettings();
+        autoSave();
     }
 };
 
@@ -366,7 +372,10 @@ function addModalKeywords() {
     });
     input.value = "";
     renderSettings();
-    if (added > 0) showToast(`Added ${added} keyword${added > 1 ? "s" : ""}.`, "success");
+    if (added > 0) {
+        showToast(`Added ${added} keyword${added > 1 ? "s" : ""}.`, "success");
+        autoSave();
+    }
 }
 
 document.getElementById("btn-open-keywords").addEventListener("click", openKeywordsModal);
@@ -386,7 +395,22 @@ document.addEventListener("keydown", (e) => {
 window.removeListItem = function (type, idx) {
     currentSettings[type].splice(idx, 1);
     renderSettings();
+    autoSave();
 };
+
+// Debounced silent save triggered by list mutations (add/remove channel, keyword, excluded word).
+let _autoSaveTimer = null;
+function autoSave() {
+    clearTimeout(_autoSaveTimer);
+    _autoSaveTimer = setTimeout(async () => {
+        if (currentInstanceId === null) return;
+        try {
+            await persistSettings();
+        } catch (_) {
+            showToast("Auto-save failed.", "error");
+        }
+    }, 400);
+}
 
 // Gather the editable inputs into currentSettings, then POST to the instance.
 async function persistSettings() {
@@ -436,6 +460,9 @@ document.getElementById("btn-save-settings").addEventListener("click", async (e)
         btn.innerHTML = originalContent;
     }
 });
+
+// Auto-save match cooldown when the field loses focus
+inputMatchCooldown.addEventListener("blur", () => { autoSave(); });
 
 // Enter key support on channel input
 document.getElementById("input-new-channel").addEventListener("keydown", (e) => {
@@ -583,37 +610,54 @@ loadInstances();
 
 // --- Per-instance connection status --- //
 
-// Reflect the selected instance's account state in the header pill, the account
-// card badge, and the request-code button label.
-function setConnected(authorized) {
+// Reflect the selected instance's state: authorized (bool) + paused (bool).
+// Three states: not connected (amber) / active (green) / paused (blue).
+function updateStatus(authorized, paused) {
+    isPaused = paused;
     const container = document.getElementById("auth-status");
     const ping = container.querySelector(".animate-ping");
     const dot = container.querySelectorAll("span span")[1];
     const text = document.getElementById("auth-text");
 
-    const green = ["bg-green-500/10", "text-green-400", "border-green-500/20"];
-    const amber = ["bg-amber-500/10", "text-amber-400", "border-amber-500/20"];
+    container.className = "flex items-center gap-2 text-xs font-medium px-3 py-1.5 rounded-full border transition-all";
+    ping.className = "animate-ping absolute inline-flex h-full w-full rounded-full opacity-75";
+    dot.className = "relative inline-flex rounded-full h-2 w-2";
 
-    function swap(el, from, to) {
-        from.forEach((c, i) => { el.className = el.className.replace(c, to[i]); });
-    }
-
-    if (authorized) {
-        swap(container, amber, green);
-        ping.className = ping.className.replace("bg-amber-400", "bg-green-400");
-        dot.className = dot.className.replace("bg-amber-500", "bg-green-500");
-        text.textContent = "Connected";
-        accountBadge.className = "text-[11px] font-medium px-2.5 py-1 rounded-full border text-green-400 border-green-500/20 bg-green-500/10";
-        accountBadge.textContent = "Connected";
-        btnRequestCode.innerText = "Reconnect";
-    } else {
-        swap(container, green, amber);
-        ping.className = ping.className.replace("bg-green-400", "bg-amber-400");
-        dot.className = dot.className.replace("bg-green-500", "bg-amber-500");
+    if (!authorized) {
+        container.className += " text-amber-400 border-amber-500/20 bg-amber-500/10";
+        ping.className += " bg-amber-400";
+        dot.className += " bg-amber-500";
         text.textContent = "Not connected";
         accountBadge.className = "text-[11px] font-medium px-2.5 py-1 rounded-full border text-amber-400 border-amber-500/20 bg-amber-500/10";
         accountBadge.textContent = "Not connected";
         btnRequestCode.innerText = "Save & Send Login Code";
+        btnPauseInstance.disabled = true;
+        btnPauseInstance.textContent = "Pause";
+        btnPauseInstance.className = btnPauseInstance.className.replace(" !text-amber-400 !border-amber-500/40", "");
+    } else if (paused) {
+        container.className += " text-blue-400 border-blue-500/20 bg-blue-500/10";
+        ping.className += " bg-blue-400";
+        dot.className += " bg-blue-500";
+        text.textContent = "Paused";
+        accountBadge.className = "text-[11px] font-medium px-2.5 py-1 rounded-full border text-green-400 border-green-500/20 bg-green-500/10";
+        accountBadge.textContent = "Connected";
+        btnRequestCode.innerText = "Reconnect";
+        btnPauseInstance.disabled = false;
+        btnPauseInstance.textContent = "Resume";
+        if (!btnPauseInstance.className.includes("!text-amber-400")) {
+            btnPauseInstance.className += " !text-amber-400 !border-amber-500/40";
+        }
+    } else {
+        container.className += " text-green-400 border-green-500/20 bg-green-500/10";
+        ping.className += " bg-green-400";
+        dot.className += " bg-green-500";
+        text.textContent = "Active";
+        accountBadge.className = "text-[11px] font-medium px-2.5 py-1 rounded-full border text-green-400 border-green-500/20 bg-green-500/10";
+        accountBadge.textContent = "Connected";
+        btnRequestCode.innerText = "Reconnect";
+        btnPauseInstance.disabled = false;
+        btnPauseInstance.textContent = "Pause";
+        btnPauseInstance.className = btnPauseInstance.className.replace(" !text-amber-400 !border-amber-500/40", "");
     }
 }
 
@@ -622,11 +666,30 @@ async function refreshAuthStatus() {
     try {
         const res = await fetch(`/api/instances/${currentInstanceId}/status`);
         const data = await res.json();
-        setConnected(!!data.authorized);
+        updateStatus(!!data.authorized, !!data.paused);
     } catch (_) {}
 }
 
 setInterval(refreshAuthStatus, 30000);
+
+// --- Pause / Resume --- //
+btnPauseInstance.addEventListener("click", async () => {
+    if (currentInstanceId === null) return;
+    const wasRunning = !isPaused;
+    const endpoint = isPaused ? "resume" : "pause";
+    btnPauseInstance.disabled = true;
+    try {
+        const res = await fetch(`/api/instances/${currentInstanceId}/${endpoint}`, { method: "POST" });
+        if (res.ok) {
+            await refreshAuthStatus();
+            showToast(wasRunning ? "Monitoring paused." : "Monitoring resumed.", "success");
+        }
+    } catch (_) {
+        showToast("Failed to change monitoring state.", "error");
+    } finally {
+        btnPauseInstance.disabled = false;
+    }
+});
 
 // --- Activity Log --- //
 function timeAgo(isoString) {

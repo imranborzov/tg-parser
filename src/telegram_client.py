@@ -36,6 +36,19 @@ LEGACY_SESSION = DB_DIR / "session.session"  # pre-multi-account single session
 
 _clients:  dict[int, TelegramClient] = {}
 _bg_tasks: dict[int, asyncio.Task] = {}
+_paused_instances: set[int] = set()
+
+
+def pause_instance(instance_id: int) -> None:
+    _paused_instances.add(instance_id)
+
+
+def resume_instance(instance_id: int) -> None:
+    _paused_instances.discard(instance_id)
+
+
+def is_instance_paused(instance_id: int) -> bool:
+    return instance_id in _paused_instances
 
 
 def _session_path(instance_id: int) -> str:
@@ -253,6 +266,9 @@ async def process_message_for_instance(instance_id: int, event):
     chat_username = getattr(chat, 'username', '') or ''
 
     if not _channel_in_list(inst.get("channels", []), chat_id, chat_username):
+        return
+
+    if instance_id in _paused_instances:
         return
 
     now = time.monotonic()
