@@ -1,6 +1,8 @@
+import csv
+import io
 import logging
 from pathlib import Path
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -25,6 +27,10 @@ from src.database_manager import (
     delete_instance,
     count_instances,
     get_events,
+    enqueue_joins,
+    get_join_queue,
+    get_join_queue_summary,
+    clear_finished_joins,
 )
 from src.telegram_client import (
     start_all_clients_bg,
@@ -39,6 +45,10 @@ from src.telegram_client import (
     pause_instance,
     resume_instance,
     is_instance_paused,
+    normalize_link,
+    pause_joins,
+    resume_joins,
+    is_joins_paused,
 )
 from typing import Optional
 
@@ -73,6 +83,7 @@ class SetupData(BaseModel):
     api_id: Optional[str] = None
     api_hash: Optional[str] = None
     phone: Optional[str] = None
+    include_channels: bool = False
 
 class InstanceCreate(BaseModel):
     name: str = "Untitled"
@@ -135,6 +146,7 @@ async def api_update_instance(instance_id: int, data: SetupData):
         api_id=data.api_id,
         api_hash=data.api_hash,
         phone=data.phone,
+        include_channels=data.include_channels,
     )
     if creds_changed:
         await reset_client(instance_id)
@@ -230,6 +242,104 @@ async def api_test_webhook(instance_id: int):
     }
     await send_to_webhook(webhook_url, sample)
     return {"status": "success"}
+
+# --- Bulk channel upload (CSV / XLSX) ---
+
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+def _cells_from_csv(data: bytes):
+    text = data.decode("utf-8-sig", errors="replace")
+    for row in csv.reader(io.StringIO(text)):
+        for cell in row:
+            yield cell
+
+
+def _cells_from_xlsx(data: bytes):
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    for ws in wb.worksheets:
+        for row in ws.iter_rows(values_only=True):
+            for cell in row:
+                if cell is not None:
+                    yield str(cell)
+    wb.close()
+
+
+def _parse_links(filename: str, data: bytes) -> list[dict]:
+    """Extract normalized join jobs from an uploaded file, deduped by identifier."""
+    name = (filename or "").lower()
+    if name.endswith(".xlsx"):
+        cells = _cells_from_xlsx(data)
+    elif name.endswith(".csv"):
+        cells = _cells_from_csv(data)
+    else:
+        raise ValueError("Unsupported file type — upload a .csv or .xlsx file.")
+
+    seen = set()
+    jobs = []
+    for cell in cells:
+        job = normalize_link(cell)
+        if job and job["identifier"] not in seen:
+            seen.add(job["identifier"])
+            jobs.append(job)
+    return jobs
+
+
+@app.post("/api/instances/{instance_id}/channels/upload")
+async def api_upload_channels(instance_id: int, file: UploadFile = File(...)):
+    if await get_instance(instance_id) is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="File too large (max 5 MB).")
+    try:
+        jobs = _parse_links(file.filename, data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Could not read that file.")
+    if not jobs:
+        return {"status": "success", "found": 0, "queued": 0,
+                "message": "No Telegram links found in the file."}
+    queued = await enqueue_joins(instance_id, jobs)
+    return {"status": "success", "found": len(jobs), "queued": queued,
+            "skipped": len(jobs) - queued}
+
+
+@app.get("/api/instances/{instance_id}/join_queue")
+async def api_join_queue(instance_id: int):
+    if await get_instance(instance_id) is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    return {
+        "summary": await get_join_queue_summary(instance_id),
+        "jobs": await get_join_queue(instance_id),
+        "paused": is_joins_paused(instance_id),
+    }
+
+
+@app.post("/api/instances/{instance_id}/join_queue/clear")
+async def api_clear_join_queue(instance_id: int):
+    if await get_instance(instance_id) is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    removed = await clear_finished_joins(instance_id)
+    return {"status": "success", "removed": removed}
+
+
+@app.post("/api/instances/{instance_id}/join_queue/pause")
+async def api_pause_joins(instance_id: int):
+    if await get_instance(instance_id) is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    pause_joins(instance_id)
+    return {"status": "success", "paused": True}
+
+
+@app.post("/api/instances/{instance_id}/join_queue/resume")
+async def api_resume_joins(instance_id: int):
+    if await get_instance(instance_id) is None:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    resume_joins(instance_id)
+    return {"status": "success", "paused": False}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

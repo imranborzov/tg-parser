@@ -27,6 +27,7 @@ async def init_db():
                 api_id TEXT DEFAULT '',
                 api_hash TEXT DEFAULT '',
                 phone TEXT DEFAULT '',
+                include_channels INTEGER DEFAULT 0,
                 created_at TEXT
             )
         ''')
@@ -37,6 +38,7 @@ async def init_db():
             "ALTER TABLE instances ADD COLUMN api_id TEXT DEFAULT ''",
             "ALTER TABLE instances ADD COLUMN api_hash TEXT DEFAULT ''",
             "ALTER TABLE instances ADD COLUMN phone TEXT DEFAULT ''",
+            "ALTER TABLE instances ADD COLUMN include_channels INTEGER DEFAULT 0",
         ):
             try:
                 await conn.execute(ddl)
@@ -61,6 +63,21 @@ async def init_db():
             await conn.execute("ALTER TABLE events ADD COLUMN instance_id INTEGER")
         except aiosqlite.OperationalError:
             pass  # Column already exists
+
+        # --- join_queue: pending/in-progress channel joins from bulk uploads ---
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS join_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instance_id INTEGER NOT NULL,
+                raw_link TEXT,
+                kind TEXT,            -- 'public' | 'invite'
+                identifier TEXT,      -- username (public) or invite hash (private)
+                status TEXT DEFAULT 'pending',  -- pending | joined | failed
+                result TEXT DEFAULT '',         -- stored channel value, or error message
+                created_at TEXT,
+                updated_at TEXT
+            )
+        ''')
 
         await conn.commit()
 
@@ -170,6 +187,7 @@ def _instance_row_to_dict(row) -> dict:
         "api_id": (row[9] or "") if len(row) > 9 else "",
         "api_hash": (row[10] or "") if len(row) > 10 else "",
         "phone": (row[11] or "") if len(row) > 11 else "",
+        "include_channels": bool(row[12]) if len(row) > 12 and row[12] else False,
     }
 
 
@@ -187,7 +205,8 @@ async def get_instance(instance_id: int):
     async with aiosqlite.connect(DB_PATH) as conn:
         async with conn.execute(
             'SELECT id, name, channels, keywords, webhook_url, tg_bot_token, '
-            'tg_chat_id, match_cooldown, excluded_keywords, api_id, api_hash, phone '
+            'tg_chat_id, match_cooldown, excluded_keywords, api_id, api_hash, phone, '
+            'include_channels '
             'FROM instances WHERE id = ?',
             (instance_id,),
         ) as cursor:
@@ -200,7 +219,8 @@ async def get_all_instances_full() -> list:
     async with aiosqlite.connect(DB_PATH) as conn:
         async with conn.execute(
             'SELECT id, name, channels, keywords, webhook_url, tg_bot_token, '
-            'tg_chat_id, match_cooldown, excluded_keywords, api_id, api_hash, phone '
+            'tg_chat_id, match_cooldown, excluded_keywords, api_id, api_hash, phone, '
+            'include_channels '
             'FROM instances ORDER BY id ASC'
         ) as cursor:
             rows = await cursor.fetchall()
@@ -222,7 +242,8 @@ async def create_instance(name: str) -> dict:
 async def update_instance(instance_id: int, *, name=None, channels=None, keywords=None,
                           webhook_url=None, tg_bot_token=None, tg_chat_id=None,
                           match_cooldown=None, excluded_keywords=None,
-                          api_id=None, api_hash=None, phone=None):
+                          api_id=None, api_hash=None, phone=None,
+                          include_channels=None):
     """Update only the provided fields of an instance."""
     fields = []
     values = []
@@ -248,6 +269,8 @@ async def update_instance(instance_id: int, *, name=None, channels=None, keyword
         fields.append('match_cooldown = ?'); values.append(match_cooldown)
     if excluded_keywords is not None:
         fields.append('excluded_keywords = ?'); values.append(json.dumps(excluded_keywords))
+    if include_channels is not None:
+        fields.append('include_channels = ?'); values.append(1 if include_channels else 0)
 
     if not fields:
         return
@@ -298,3 +321,119 @@ async def get_events(instance_id: int, limit: int = 50) -> list:
         ) as cursor:
             rows = await cursor.fetchall()
     return [dict(row) for row in rows]
+
+
+# --- Join queue (bulk channel uploads) ---
+
+async def enqueue_joins(instance_id: int, items: list[dict]) -> int:
+    """Insert (instance_id, kind, identifier, raw_link) rows as pending.
+    Skips identifiers already present for this instance in a pending/joined state
+    so re-uploading a file doesn't duplicate work. Returns the count inserted."""
+    if not items:
+        return 0
+    now = _now_iso()
+    inserted = 0
+    async with aiosqlite.connect(DB_PATH) as conn:
+        async with conn.execute(
+            "SELECT identifier FROM join_queue "
+            "WHERE instance_id = ? AND status IN ('pending', 'joined')",
+            (instance_id,),
+        ) as cursor:
+            existing = {r[0] for r in await cursor.fetchall()}
+        for it in items:
+            ident = it["identifier"]
+            if ident in existing:
+                continue
+            existing.add(ident)
+            await conn.execute(
+                'INSERT INTO join_queue (instance_id, raw_link, kind, identifier, '
+                'status, result, created_at, updated_at) '
+                "VALUES (?, ?, ?, ?, 'pending', '', ?, ?)",
+                (instance_id, it.get("raw_link", ""), it["kind"], ident, now, now),
+            )
+            inserted += 1
+        await conn.commit()
+    return inserted
+
+
+async def get_join_queue(instance_id: int, limit: int = 500) -> list:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute(
+            'SELECT * FROM join_queue WHERE instance_id = ? ORDER BY id ASC LIMIT ?',
+            (instance_id, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def get_join_queue_summary(instance_id: int) -> dict:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        async with conn.execute(
+            'SELECT status, COUNT(*) FROM join_queue WHERE instance_id = ? GROUP BY status',
+            (instance_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+    summary = {"pending": 0, "joined": 0, "failed": 0, "skipped": 0}
+    for status, count in rows:
+        summary[status] = count
+    return summary
+
+
+async def get_pending_join_instance_ids() -> list[int]:
+    """Instance ids that still have at least one pending join."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        async with conn.execute(
+            "SELECT DISTINCT instance_id FROM join_queue WHERE status = 'pending'"
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [r[0] for r in rows]
+
+
+async def get_next_pending_join(instance_id: int):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute(
+            "SELECT * FROM join_queue WHERE instance_id = ? AND status = 'pending' "
+            'ORDER BY id ASC LIMIT 1',
+            (instance_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def update_join_status(job_id: int, status: str, result: str = ''):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            'UPDATE join_queue SET status = ?, result = ?, updated_at = ? WHERE id = ?',
+            (status, result, _now_iso(), job_id),
+        )
+        await conn.commit()
+
+
+async def count_joins_today(instance_id: int) -> int:
+    """How many joins succeeded for this instance since UTC midnight — used to
+    enforce a daily cap that keeps the account under Telegram's radar."""
+    midnight = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).isoformat()
+    async with aiosqlite.connect(DB_PATH) as conn:
+        async with conn.execute(
+            "SELECT COUNT(*) FROM join_queue "
+            "WHERE instance_id = ? AND status = 'joined' AND updated_at >= ?",
+            (instance_id, midnight),
+        ) as cursor:
+            (count,) = await cursor.fetchone()
+    return count
+
+
+async def clear_finished_joins(instance_id: int) -> int:
+    """Remove finished rows (joined/failed/skipped) for an instance; keep pending."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "DELETE FROM join_queue WHERE instance_id = ? "
+            "AND status IN ('joined', 'failed', 'skipped')",
+            (instance_id,),
+        )
+        await conn.commit()
+        return cur.rowcount

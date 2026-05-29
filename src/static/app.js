@@ -38,7 +38,8 @@ let currentSettings = {
     match_cooldown: 60,
     api_id: "",
     api_hash: "",
-    phone: ""
+    phone: "",
+    include_channels: false
 };
 
 // --- Elements --- //
@@ -58,6 +59,11 @@ const btnRequestCode = document.getElementById("btn-request-code");
 const btnPauseInstance = document.getElementById("btn-pause-instance");
 const instanceBar = document.getElementById("instance-bar");
 const instanceSelect = document.getElementById("instance-select");
+const inputChannelsFile = document.getElementById("input-channels-file");
+const btnChooseFile = document.getElementById("btn-choose-file");
+const btnUploadChannels = document.getElementById("btn-upload-channels");
+const uploadFilename = document.getElementById("upload-filename");
+const inputIncludeChannels = document.getElementById("input-include-channels");
 
 // --- Per-instance Auth Flow --- //
 
@@ -422,6 +428,7 @@ async function persistSettings() {
     currentSettings.api_id = inputApiId.value.trim();
     currentSettings.api_hash = inputApiHash.value.trim();
     currentSettings.phone = inputPhone.value.trim();
+    currentSettings.include_channels = inputIncludeChannels.checked;
 
     const res = await fetch(`/api/instances/${currentInstanceId}`, {
         method: "POST",
@@ -436,7 +443,8 @@ async function persistSettings() {
             match_cooldown: currentSettings.match_cooldown,
             api_id: currentSettings.api_id,
             api_hash: currentSettings.api_hash,
-            phone: currentSettings.phone
+            phone: currentSettings.phone,
+            include_channels: currentSettings.include_channels
         })
     });
     if (!res.ok) throw new Error("Save failed.");
@@ -464,6 +472,9 @@ document.getElementById("btn-save-settings").addEventListener("click", async (e)
 // Auto-save match cooldown when the field loses focus
 inputMatchCooldown.addEventListener("blur", () => { autoSave(); });
 
+// Auto-save the "include broadcast channels" toggle on change
+inputIncludeChannels.addEventListener("change", () => { autoSave(); });
+
 // Enter key support on channel input
 document.getElementById("input-new-channel").addEventListener("keydown", (e) => {
     if (e.key === "Enter") addListItem("channels");
@@ -485,6 +496,7 @@ function applySettingsToInputs() {
     inputApiId.value = currentSettings.api_id || "";
     inputApiHash.value = currentSettings.api_hash || "";
     inputPhone.value = currentSettings.phone || "";
+    inputIncludeChannels.checked = !!currentSettings.include_channels;
     resetAuthSteps();
     renderSettings();
 }
@@ -516,7 +528,8 @@ async function loadInstanceSettings(id) {
         match_cooldown: data.match_cooldown ?? 60,
         api_id: data.api_id || "",
         api_hash: data.api_hash || "",
-        phone: data.phone || ""
+        phone: data.phone || "",
+        include_channels: !!data.include_channels
     };
     applySettingsToInputs();
 }
@@ -530,6 +543,8 @@ async function selectInstance(id) {
     const list = document.getElementById("events-list");
     if (list) list.dataset.topId = "";
     await loadEvents();
+    _lastJoinedCount = -1;
+    await refreshJoinQueue();
 }
 
 async function loadInstances(preferredId = null) {
@@ -690,6 +705,186 @@ btnPauseInstance.addEventListener("click", async () => {
         btnPauseInstance.disabled = false;
     }
 });
+
+// --- Bulk channel upload + join queue --- //
+
+let _lastJoinedCount = -1;
+
+btnChooseFile.addEventListener("click", () => inputChannelsFile.click());
+
+inputChannelsFile.addEventListener("change", () => {
+    const file = inputChannelsFile.files[0];
+    if (file) {
+        uploadFilename.textContent = file.name;
+        btnUploadChannels.disabled = false;
+    } else {
+        uploadFilename.textContent = "";
+        btnUploadChannels.disabled = true;
+    }
+});
+
+btnUploadChannels.addEventListener("click", async () => {
+    if (currentInstanceId === null) return;
+    const file = inputChannelsFile.files[0];
+    if (!file) return;
+
+    const original = btnUploadChannels.textContent;
+    btnUploadChannels.disabled = true;
+    btnUploadChannels.textContent = "Uploading…";
+    try {
+        const form = new FormData();
+        form.append("file", file);
+        const res = await fetch(`/api/instances/${currentInstanceId}/channels/upload`, {
+            method: "POST",
+            body: form,
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.detail || "Upload failed.", "error");
+            return;
+        }
+        if (data.found === 0) {
+            showToast(data.message || "No links found.", "info");
+        } else {
+            const skipped = data.skipped ? ` (${data.skipped} already queued)` : "";
+            showToast(`Queued ${data.queued} channel${data.queued === 1 ? "" : "s"} to join${skipped}.`, "success");
+        }
+        inputChannelsFile.value = "";
+        uploadFilename.textContent = "";
+        await refreshJoinQueue();
+    } catch (_) {
+        showToast("Network error during upload.", "error");
+    } finally {
+        btnUploadChannels.textContent = original;
+        btnUploadChannels.disabled = !inputChannelsFile.files[0];
+    }
+});
+
+document.getElementById("btn-clear-queue").addEventListener("click", async () => {
+    if (currentInstanceId === null) return;
+    try {
+        await fetch(`/api/instances/${currentInstanceId}/join_queue/clear`, { method: "POST" });
+        await refreshJoinQueue();
+    } catch (_) {
+        showToast("Failed to clear queue.", "error");
+    }
+});
+
+let _joinsPaused = false;
+
+document.getElementById("btn-pause-joins").addEventListener("click", async () => {
+    if (currentInstanceId === null) return;
+    const endpoint = _joinsPaused ? "resume" : "pause";
+    const btn = document.getElementById("btn-pause-joins");
+    btn.disabled = true;
+    try {
+        const res = await fetch(`/api/instances/${currentInstanceId}/join_queue/${endpoint}`, { method: "POST" });
+        if (res.ok) {
+            showToast(_joinsPaused ? "Joining resumed." : "Joining paused.", "success");
+            await refreshJoinQueue();
+        }
+    } catch (_) {
+        showToast("Failed to change joining state.", "error");
+    } finally {
+        btn.disabled = false;
+    }
+});
+
+// Pull the channels stored on the server into the list without disturbing the
+// text inputs the user may be editing (joins add channels server-side).
+async function refreshChannelList() {
+    if (currentInstanceId === null) return;
+    try {
+        const res = await fetch(`/api/instances/${currentInstanceId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        currentSettings.channels = data.channels || [];
+        renderSettings();
+    } catch (_) {}
+}
+
+function renderJoinQueue(summary, jobs, paused) {
+    const box = document.getElementById("join-queue-box");
+    const summaryEl = document.getElementById("join-queue-summary");
+    const list = document.getElementById("join-queue-list");
+    const pauseBtn = document.getElementById("btn-pause-joins");
+
+    _joinsPaused = !!paused;
+
+    const total = (summary.pending || 0) + (summary.joined || 0) + (summary.failed || 0) + (summary.skipped || 0);
+    if (total === 0) {
+        box.classList.add("hidden");
+        list.innerHTML = "";
+        return;
+    }
+    box.classList.remove("hidden");
+
+    // Pause control only matters while there are channels still waiting to join.
+    if (summary.pending) {
+        pauseBtn.classList.remove("hidden");
+        pauseBtn.textContent = _joinsPaused ? "Resume joining" : "Pause joining";
+        pauseBtn.className = pauseBtn.className.replace(" text-green-400 hover:text-green-300", "").replace(" text-amber-400 hover:text-amber-300", "");
+        pauseBtn.className += _joinsPaused ? " text-green-400 hover:text-green-300" : " text-amber-400 hover:text-amber-300";
+    } else {
+        pauseBtn.classList.add("hidden");
+    }
+
+    const parts = [];
+    if (summary.pending) parts.push(_joinsPaused ? `${summary.pending} pending (paused)` : `${summary.pending} pending`);
+    if (summary.joined) parts.push(`${summary.joined} joined`);
+    if (summary.skipped) parts.push(`${summary.skipped} skipped`);
+    if (summary.failed) parts.push(`${summary.failed} failed`);
+    summaryEl.textContent = parts.join(" · ");
+
+    list.innerHTML = "";
+    jobs.forEach(job => {
+        const li = document.createElement("li");
+        li.className = "flex items-center justify-between gap-2 text-xs bg-dark-bg px-2.5 py-1.5 rounded-lg border border-dark-border";
+
+        const label = document.createElement("span");
+        label.className = "truncate text-gray-400";
+        label.textContent = job.kind === "invite" ? `+${job.identifier}` : job.identifier;
+        if ((job.status === "failed" || job.status === "skipped") && job.result) label.title = job.result;
+
+        const badge = document.createElement("span");
+        badge.className = "shrink-0 px-2 py-0.5 rounded-full font-medium ";
+        if (job.status === "joined") {
+            badge.className += "bg-green-500/15 text-green-400";
+            badge.textContent = "joined";
+        } else if (job.status === "failed") {
+            badge.className += "bg-red-500/15 text-red-400";
+            badge.textContent = "failed";
+        } else if (job.status === "skipped") {
+            badge.className += "bg-gray-500/15 text-gray-400";
+            badge.textContent = "skipped";
+        } else {
+            badge.className += "bg-amber-500/15 text-amber-400";
+            badge.textContent = "pending";
+        }
+
+        li.appendChild(label);
+        li.appendChild(badge);
+        list.appendChild(li);
+    });
+}
+
+async function refreshJoinQueue() {
+    if (currentInstanceId === null) return;
+    try {
+        const res = await fetch(`/api/instances/${currentInstanceId}/join_queue`);
+        if (!res.ok) return;
+        const data = await res.json();
+        renderJoinQueue(data.summary || {}, data.jobs || [], data.paused);
+        // When the joined count climbs, new channels were added server-side.
+        const joined = data.summary ? data.summary.joined || 0 : 0;
+        if (_lastJoinedCount !== -1 && joined > _lastJoinedCount) {
+            await refreshChannelList();
+        }
+        _lastJoinedCount = joined;
+    } catch (_) {}
+}
+
+setInterval(refreshJoinQueue, 10000);
 
 // --- Activity Log --- //
 function timeAgo(isoString) {

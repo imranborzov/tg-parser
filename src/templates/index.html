@@ -257,6 +257,57 @@
                             <button onclick="addListItem('channels')"
                                 class="btn-ghost px-3 text-lg leading-none">+</button>
                         </div>
+
+                        <!-- Bulk upload -->
+                        <div class="mt-3 pt-3 border-t border-dark-border">
+                            <div class="flex items-center gap-1.5 mb-1.5">
+                                <label class="text-xs text-gray-400">Bulk upload (CSV / Excel)</label>
+                                <button onclick="toggleHelp('help-upload')" class="help-btn">?</button>
+                            </div>
+                            <div id="help-upload" class="hidden help-box mb-2">
+                                <p class="help-title">Joining many channels at once</p>
+                                <p>Upload a <span class="text-gray-200">.csv</span> or <span class="text-gray-200">.xlsx</span> with channel links in any column.</p>
+                                <p>Accepts <span class="text-gray-200">t.me/name</span>, <span class="text-gray-200">@name</span>, and invite links <span class="text-gray-200">t.me/+hash</span>.</p>
+                                <p>This account <span class="text-gray-200">joins</span> each channel automatically, paced to stay under Telegram's limits (~45/day). Progress survives restarts.</p>
+                                <p>The instance must be <span class="text-gray-200">connected</span> for joining to run.</p>
+                            </div>
+                            <div class="flex gap-2">
+                                <input type="file" id="input-channels-file" accept=".csv,.xlsx"
+                                    class="hidden">
+                                <button id="btn-choose-file" class="btn-ghost px-3 flex-1 text-sm whitespace-nowrap">
+                                    Choose file…
+                                </button>
+                                <button id="btn-upload-channels" class="btn-primary px-3 text-sm whitespace-nowrap" disabled>
+                                    Upload
+                                </button>
+                            </div>
+                            <p id="upload-filename" class="text-xs text-gray-500 mt-1.5 truncate"></p>
+
+                            <label class="flex items-center gap-2 mt-2 cursor-pointer select-none">
+                                <input type="checkbox" id="input-include-channels"
+                                    class="accent-primary w-3.5 h-3.5">
+                                <span class="text-xs text-gray-400">Also join broadcast channels (default: groups only)</span>
+                            </label>
+
+                            <!-- Join queue progress -->
+                            <div id="join-queue-box" class="hidden mt-3">
+                                <div class="flex items-center justify-between mb-1.5">
+                                    <span id="join-queue-summary" class="text-xs text-gray-400"></span>
+                                    <div class="flex items-center gap-3">
+                                        <button id="btn-pause-joins"
+                                            class="text-xs text-amber-400 hover:text-amber-300 transition-colors hidden">
+                                            Pause joining
+                                        </button>
+                                        <button id="btn-clear-queue"
+                                            class="text-xs text-gray-500 hover:text-gray-300 transition-colors">
+                                            Clear finished
+                                        </button>
+                                    </div>
+                                </div>
+                                <ul id="join-queue-list"
+                                    class="space-y-1 max-h-40 overflow-y-auto custom-scrollbar"></ul>
+                            </div>
+                        </div>
                     </div>
 
                     <!-- Keywords -->
@@ -365,7 +416,7 @@
     </div>
 
     <div id="toast-container"></div>
-    <script src="/static/app.js?v=13"></script>
+    <script src="/static/app.js?v=16"></script>
 
 </body>
 
