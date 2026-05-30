@@ -954,6 +954,42 @@ async function loadEvents() {
             li.appendChild(top);
             li.appendChild(preview);
 
+            // Sender info — kept so a lead is traceable even if the message is deleted.
+            if (ev.sender_id || ev.sender_username || ev.sender_name) {
+                const senderRow = document.createElement("div");
+                senderRow.className = "flex items-center gap-2 text-xs text-gray-500 flex-wrap";
+
+                const who = document.createElement("span");
+                who.className = "text-gray-400";
+                const display = ev.sender_name || (ev.sender_username ? `@${ev.sender_username}` : `User ${ev.sender_id}`);
+                who.textContent = `👤 ${display}`;
+                senderRow.appendChild(who);
+
+                if (ev.sender_username) {
+                    const uname = document.createElement("a");
+                    uname.href = `https://t.me/${ev.sender_username}`;
+                    uname.target = "_blank";
+                    uname.rel = "noopener noreferrer";
+                    uname.className = "text-primary hover:underline";
+                    uname.textContent = `@${ev.sender_username}`;
+                    senderRow.appendChild(uname);
+                }
+
+                if (ev.sender_id) {
+                    const idTag = document.createElement("span");
+                    idTag.className = "font-mono bg-dark-bg border border-dark-border rounded px-1.5 py-0.5 cursor-pointer hover:text-gray-300";
+                    idTag.textContent = `id: ${ev.sender_id}`;
+                    idTag.title = "Click to copy ID";
+                    idTag.addEventListener("click", () => {
+                        navigator.clipboard?.writeText(ev.sender_id);
+                        showToast("User ID copied.", "success");
+                    });
+                    senderRow.appendChild(idTag);
+                }
+
+                li.appendChild(senderRow);
+            }
+
             if (ev.message_link && ev.message_link !== "No link available") {
                 const link = document.createElement("a");
                 link.href = ev.message_link;

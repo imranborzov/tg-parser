@@ -54,15 +54,24 @@ async def init_db():
                 keyword TEXT,
                 message_text TEXT,
                 message_link TEXT,
-                matched_at TEXT
+                matched_at TEXT,
+                sender_id TEXT,
+                sender_username TEXT,
+                sender_name TEXT
             )
         ''')
 
-        # Add instance_id to events if upgrading from an older schema (idempotent)
-        try:
-            await conn.execute("ALTER TABLE events ADD COLUMN instance_id INTEGER")
-        except aiosqlite.OperationalError:
-            pass  # Column already exists
+        # Add columns introduced after the initial events schema (idempotent)
+        for ddl in (
+            "ALTER TABLE events ADD COLUMN instance_id INTEGER",
+            "ALTER TABLE events ADD COLUMN sender_id TEXT",
+            "ALTER TABLE events ADD COLUMN sender_username TEXT",
+            "ALTER TABLE events ADD COLUMN sender_name TEXT",
+        ):
+            try:
+                await conn.execute(ddl)
+            except aiosqlite.OperationalError:
+                pass  # Column already exists
 
         # --- join_queue: pending/in-progress channel joins from bulk uploads ---
         await conn.execute('''
@@ -297,12 +306,16 @@ async def count_instances() -> int:
 
 
 async def insert_event(instance_id: int, channel_id: str, channel_name: str, keyword: str,
-                       message_text: str, message_link: str, matched_at: str):
+                       message_text: str, message_link: str, matched_at: str,
+                       sender_id: str = None, sender_username: str = None,
+                       sender_name: str = None):
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute('''
-            INSERT INTO events (instance_id, channel_id, channel_name, keyword, message_text, message_link, matched_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (instance_id, channel_id, channel_name, keyword, message_text, message_link, matched_at))
+            INSERT INTO events (instance_id, channel_id, channel_name, keyword, message_text,
+                                message_link, matched_at, sender_id, sender_username, sender_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (instance_id, channel_id, channel_name, keyword, message_text, message_link,
+              matched_at, sender_id, sender_username, sender_name))
         # Keep only the latest 200 events per instance
         await conn.execute('''
             DELETE FROM events WHERE instance_id = ? AND id NOT IN (

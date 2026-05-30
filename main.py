@@ -238,7 +238,10 @@ async def api_test_webhook(instance_id: int):
         "message_link": "https://t.me/c/1234567890/1",
         "matched_keyword": "test",
         "date": "2024-01-01T00:00:00+00:00",
-        "sender_id": None,
+        "sender_id": "123456789",
+        "sender_username": "example_user",
+        "sender_name": "Example User",
+        "sender_link": "https://t.me/example_user",
     }
     await send_to_webhook(webhook_url, sample)
     return {"status": "success"}

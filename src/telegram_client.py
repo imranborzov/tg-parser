@@ -308,14 +308,20 @@ def normalize_link(raw: str) -> Optional[dict]:
     return None
 
 
-async def _add_channel_to_instance(instance_id: int, value: str):
-    """Append a resolved channel identifier to the instance's filter list (deduped)."""
+async def _add_channels_to_instance(instance_id: int, values: list[str]):
+    """Append resolved channel identifiers to the instance's filter list (deduped).
+    Multiple values per joined chat let us store both the -100 id and the
+    @username, so a future channel rename can't silently break the filter."""
     inst = await get_instance(instance_id)
     if not inst:
         return
     channels = list(inst.get("channels", []))
-    if value not in channels:
-        channels.append(value)
+    added = False
+    for v in values:
+        if v and v not in channels:
+            channels.append(v)
+            added = True
+    if added:
         await update_instance(instance_id, channels=channels)
 
 
@@ -325,11 +331,22 @@ def _is_broadcast(obj) -> bool:
     return bool(getattr(obj, "broadcast", False)) and not getattr(obj, "megagroup", False)
 
 
+def _filter_values_for_chat(chat, fallback_username: str = None) -> list[str]:
+    """Build the durable filter handles to store for a joined chat: always the
+    numeric -100 id (survives renames), plus the username when there is one
+    (readable in the UI). Order matters — id first so it's the primary handle."""
+    values = [str(utils.get_peer_id(chat))]
+    username = getattr(chat, "username", None) or fallback_username
+    if username and username not in values:
+        values.append(username.lstrip("@"))
+    return values
+
+
 async def _classify_and_join(client: TelegramClient, job: dict, include_channels: bool):
     """Resolve the target's type *before* joining. Broadcast channels are skipped
-    unless `include_channels` is set. Returns (outcome, value) where outcome is
-    'joined' (value = stored filter id) or 'skipped' (value = reason). Raises on
-    real join errors."""
+    unless `include_channels` is set. Returns (outcome, payload) where outcome
+    is 'joined' (payload = list of filter values to add) or 'skipped' (payload
+    = reason string). Raises on real join errors."""
     kind = job["kind"]
     identifier = job["identifier"]
 
@@ -339,19 +356,20 @@ async def _classify_and_join(client: TelegramClient, job: dict, include_channels
         if existing is not None:
             if _is_broadcast(existing) and not include_channels:
                 return "skipped", "broadcast channel"
-            return "joined", str(utils.get_peer_id(existing))
+            return "joined", _filter_values_for_chat(existing)
         # Not yet a member — `info` is a ChatInvite preview carrying the flags.
         if _is_broadcast(info) and not include_channels:
             return "skipped", "broadcast channel"
         updates = await client(ImportChatInviteRequest(identifier))
-        return "joined", str(utils.get_peer_id(updates.chats[0]))
+        return "joined", _filter_values_for_chat(updates.chats[0])
 
     # public: resolving the username does not join, so we can inspect type first.
     entity = await client.get_entity(identifier)
     if _is_broadcast(entity) and not include_channels:
         return "skipped", "broadcast channel"
     await client(JoinChannelRequest(identifier))
-    return "joined", identifier
+    # Store BOTH the numeric id (rename-proof) and the username (human-readable).
+    return "joined", _filter_values_for_chat(entity, fallback_username=identifier)
 
 
 async def _process_one_join(instance_id: int) -> None:
@@ -377,19 +395,19 @@ async def _process_one_join(instance_id: int) -> None:
 
     _schedule_next_join(instance_id, now)
     try:
-        outcome, value = await _classify_and_join(client, job, include_channels)
+        outcome, payload = await _classify_and_join(client, job, include_channels)
         if outcome == "skipped":
-            await update_join_status(job["id"], "skipped", value)
+            await update_join_status(job["id"], "skipped", payload)
             # No actual join occurred — only a light resolve — so don't burn a full
             # 60-150s slot; a list full of channels would otherwise take hours.
             _next_join_at[instance_id] = now + random.uniform(5, 15)
             logger.info("Instance %s skipped %s (%s).",
-                        instance_id, job["identifier"], value)
+                        instance_id, job["identifier"], payload)
         else:
-            await _add_channel_to_instance(instance_id, value)
-            await update_join_status(job["id"], "joined", value)
+            await _add_channels_to_instance(instance_id, payload)
+            await update_join_status(job["id"], "joined", ", ".join(payload))
             logger.info("Instance %s joined %s (stored as %s).",
-                        instance_id, job["identifier"], value)
+                        instance_id, job["identifier"], payload)
     except errors.FloodWaitError as e:
         # Back off for at least the duration Telegram demands; leave job pending.
         _next_join_at[instance_id] = now + e.seconds
@@ -467,6 +485,32 @@ def _channel_in_list(channels, chat_id: str, chat_username: str) -> bool:
     return False
 
 
+def _build_sender_fields(sender, sender_id) -> dict:
+    """Extract identifying info about a message's author so a lead can be traced
+    back even if the original message is later deleted. Username is often absent,
+    so the numeric id is the reliable handle; for anonymous/channel posts there
+    may be no user at all."""
+    username = getattr(sender, "username", None) if sender else None
+    first = getattr(sender, "first_name", "") or "" if sender else ""
+    last = getattr(sender, "last_name", "") or "" if sender else ""
+    title = getattr(sender, "title", "") or "" if sender else ""  # channel-as-sender
+    name = (f"{first} {last}".strip() or title) or None
+
+    if username:
+        link = f"https://t.me/{username}"
+    elif sender_id:
+        link = f"tg://user?id={sender_id}"  # opens the profile in most clients
+    else:
+        link = None
+
+    return {
+        "sender_id": str(sender_id) if sender_id else None,
+        "sender_username": username,
+        "sender_name": name,
+        "sender_link": link,
+    }
+
+
 async def process_message_for_instance(instance_id: int, event):
     """Handle one incoming message for a single instance's client."""
     inst = await get_instance(instance_id)
@@ -513,10 +557,19 @@ async def process_message_for_instance(instance_id: int, event):
 
     channel_name = getattr(chat, 'title', None) or getattr(chat, 'username', 'Unknown')
 
-    await _dispatch_for_instance(inst, now, chat_id, channel_name, message_text, message_link, event)
+    sender = None
+    try:
+        sender = await event.get_sender()
+    except Exception as e:
+        logger.debug("Could not resolve sender for message in %s: %s", chat_id, e)
+    sender_info = _build_sender_fields(sender, event.message.sender_id)
+
+    await _dispatch_for_instance(inst, now, chat_id, channel_name, message_text,
+                                 message_link, event, sender_info)
 
 
-async def _dispatch_for_instance(inst, now, chat_id, channel_name, message_text, message_link, event):
+async def _dispatch_for_instance(inst, now, chat_id, channel_name, message_text,
+                                 message_link, event, sender_info):
     keywords = inst.get("keywords", [])
     excluded_keywords = inst.get("excluded_keywords", [])
     webhook_url = inst.get("webhook_url", "")
@@ -563,7 +616,7 @@ async def _dispatch_for_instance(inst, now, chat_id, channel_name, message_text,
         "message_link": message_link,
         "matched_keyword": matched_keyword,
         "date": event.message.date.isoformat(),
-        "sender_id": str(event.message.sender_id) if event.message.sender_id else None,
+        **sender_info,
     }
 
     # Persist to this instance's activity log
@@ -575,6 +628,9 @@ async def _dispatch_for_instance(inst, now, chat_id, channel_name, message_text,
         message_text=message_text[:500],
         message_link=message_link,
         matched_at=payload["date"],
+        sender_id=sender_info["sender_id"],
+        sender_username=sender_info["sender_username"],
+        sender_name=sender_info["sender_name"],
     ))
 
     if webhook_url:
@@ -601,6 +657,24 @@ def _escape_md(text: str) -> str:
     return text
 
 
+def _format_sender_line(payload: dict) -> str:
+    """A '👤 From' line for the bot message, or '' when there's no user (e.g. an
+    anonymous admin or a broadcast post). Always shows the numeric id when known
+    so the lead is traceable after the message is gone."""
+    sid = payload.get("sender_id")
+    uname = payload.get("sender_username")
+    name = payload.get("sender_name")
+    if not (sid or uname or name):
+        return ""
+    display = name or (f"@{uname}" if uname else f"User {sid}")
+    line = f"👤 *From:* {_escape_md(display)}"
+    if uname:
+        line += f" (@{uname})"
+    if sid:
+        line += f" — `{sid}`"
+    return line + "\n"
+
+
 async def send_to_tg_bot(bot_token: str, chat_id: str, payload: dict):
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
 
@@ -612,6 +686,7 @@ async def send_to_tg_bot(bot_token: str, chat_id: str, payload: dict):
     text = (
         f"🔔 *New Match:* {_escape_md(payload.get('matched_keyword', ''))}\n"
         f"📢 *Channel:* {_escape_md(payload.get('channel_name', ''))}\n"
+        f"{_format_sender_line(payload)}"
         f"🔗 *Link:* {payload.get('message_link', '')}\n\n"
         f"{payload.get('message_text', '')}"
     )
